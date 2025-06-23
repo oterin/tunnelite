@@ -49,3 +49,8 @@ class Node(BaseModel):
     verified_geolocation: dict | None = None
     verified_geolocation_verified_at: dict | None = None
     last_seen_at: float | None = None
+
+class ActivationRequest(BaseModel):
+    tunnel_id: str
+    api_key: str
+    node_id: str

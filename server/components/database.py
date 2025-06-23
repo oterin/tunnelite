@@ -148,3 +148,34 @@ def get_active_nodes() -> List[Dict]:
             active_nodes.append(node)
 
     return active_nodes
+
+def get_tunnel_by_id(tunnel_id: str) -> Optional[Dict]:
+    _ensure_db_file_exists(TUNNEL_DB_FILE)
+    with open(TUNNEL_DB_FILE, 'r') as f:
+        for line in f:
+            if not line.strip(): continue
+            tunnel_data = json.loads(line)
+            if tunnel_data.get("tunnel_id") == tunnel_id:
+                return tunnel_data
+    return None
+
+def update_tunnel_status(tunnel_id: str, status: str) -> bool:
+    tunnels = []
+    updated = False
+    _ensure_db_file_exists(TUNNEL_DB_FILE)
+    with open(TUNNEL_DB_FILE, 'r') as f:
+        for line in f:
+            if not line.strip(): continue
+            tunnels.append(json.loads(line))
+
+    for i, tunnel in enumerate(tunnels):
+        if tunnel.get("tunnel_id") == tunnel_id:
+            tunnels[i]["status"] = status
+            updated = True
+            break
+
+    if updated:
+        with open(TUNNEL_DB_FILE, 'w') as f:
+            for tunnel in tunnels:
+                f.write(json.dumps(tunnel) + '\n')
+    return updated
