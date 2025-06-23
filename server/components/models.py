@@ -1,5 +1,7 @@
 from os import sep
+import time
 from pydantic import BaseModel, Field
+from requests.models import stream_decode_response_unicode
 
 class UserCreate(BaseModel):
     username: str
@@ -23,3 +25,13 @@ class Tunnel(BaseModel):
     public_url: str
     status: str
     created_at: float
+
+class NodeInfo(BaseModel):
+    node_id: str
+    location: str
+    last_seen_at: float = Field(default_factory=time.time)
+
+class NodeInfoPublic(BaseModel):
+    node_id: str
+    location: str
+    public_address: str
