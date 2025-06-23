@@ -37,24 +37,12 @@ async def get_admin_api_key(
         detail="invalid or missing admin key"
     )
 
-# --- router ---
 router = APIRouter(
     prefix="/tunnelite/admin",
     tags=["admin"],
     dependencies=[Depends(get_admin_api_key)]
 )
 
-# --- pydantic models (ensure this is correct) ---
-class Node(BaseModel):
-    node_id: str
-    status: str
-    reported_location: str | None = Field(None, alias="location")
-    public_address: str | None = None
-    verified_ip_address: str | None = None
-    verified_geolocation: dict | None = None
-    last_seen_at: float | None = None
-
-# --- api endpoints ---
 @router.get("/nodes", response_model=List[Node])
 async def list_all_nodes():
     return database.get_all_nodes()
