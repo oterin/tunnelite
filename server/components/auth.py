@@ -7,6 +7,10 @@ from typing import Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader, OAuth2PasswordRequestForm
+
+import bcrypt
+bcrypt.__about__ = bcrypt
+
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
@@ -20,7 +24,7 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # router setup
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+router = APIRouter(prefix="/tunnelite/auth", tags=["Authentication"])
 
 # helper functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -89,3 +93,8 @@ async def refresh_api_key(current_user: Dict = Depends(get_current_user)) -> Tok
     database.save_user(current_user)
 
     return Token(api_key=new_api_key)
+
+@router.get("/users/me", response_model=User)
+
+async def read_users_me(current_user: dict = Depends(get_current_user)):
+    return current_user

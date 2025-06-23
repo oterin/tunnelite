@@ -13,10 +13,14 @@ from fastapi.security import APIKeyHeader
 
 from server.components import database
 from server.components.models import *
+from pydantic import BaseModel, Field
+
+from dotenv import load_dotenv
+load_dotenv()
 
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
-    raise ValueError("ADMIN_API_KEY environment variable is not set")
+    raise ValueError("TUNNELITE_ADMIN_KEY environment variable is not set")
 
 api_key_header = APIKeyHeader(
     name="X-Admin-Key",
@@ -33,17 +37,29 @@ async def get_admin_api_key(
         detail="invalid or missing admin key"
     )
 
+# --- router ---
 router = APIRouter(
-    prefix="/admin",
+    prefix="/tunnelite/admin",
     tags=["admin"],
     dependencies=[Depends(get_admin_api_key)]
 )
 
-@router.get("/nodes", response_model=list[Node])
+# --- pydantic models (ensure this is correct) ---
+class Node(BaseModel):
+    node_id: str
+    status: str
+    reported_location: str | None = Field(None, alias="location")
+    public_address: str | None = None
+    verified_ip_address: str | None = None
+    verified_geolocation: dict | None = None
+    last_seen_at: float | None = None
+
+# --- api endpoints ---
+@router.get("/nodes", response_model=List[Node])
 async def list_all_nodes():
     return database.get_all_nodes()
 
-@router.get(
+@router.post(
     "/nodes/{node_id}/approve",
     status_code=status.HTTP_200_OK
 )

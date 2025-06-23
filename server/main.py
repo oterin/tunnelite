@@ -3,10 +3,7 @@ the server
 """
 
 from fastapi import Depends, FastAPI
-from dotenv import load_dotenv
 import os
-
-load_dotenv()
 
 from server.components import (
     auth,
@@ -20,7 +17,11 @@ app = FastAPI(
     description="we tunnelin data in here",
     version="0.1.0",
 )
-app.include_router(auth.router, prefix="/tunnelite")
-app.include_router(tunnels.router, prefix="/tunnelite")
-app.include_router(nodes.router, prefix="/tunnelite")
-app.include_router(admin.router, prefix="/tunnelite")
+app.include_router(auth.router)
+app.include_router(tunnels.router)
+app.include_router(nodes.router)
+app.include_router(admin.router)
+
+@app.get("/tunnelite/users/me")
+async def me(user: auth.User = Depends(auth.get_current_user)):
+    return user

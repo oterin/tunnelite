@@ -1,5 +1,13 @@
-NODE_ID = "dev"
-NODE_LOCATION = "local, earth"
-NODE_PUBLIC_ADDRESS = "http://localhost:8001"
+import os
+from dotenv import load_dotenv
 
-MAIN_SERVER_URL = "http://localhost:8000"
+load_dotenv("tunnel_node/.env")
+
+NODE_ID = os.getenv("NODE_ID")
+NODE_LOCATION = os.getenv("NODE_LOCATION")
+NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
+
+MAIN_SERVER_URL = os.getenv("MAIN_SERVER_URL")
+
+if not all([NODE_ID, NODE_LOCATION, NODE_PUBLIC_ADDRESS, MAIN_SERVER_URL]):
+    raise RuntimeError("missing environment variables in .env.node")

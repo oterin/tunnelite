@@ -40,14 +40,19 @@ def find_user_by_api_key(api_key: str) -> Optional[Dict]:
 def save_user(user_data: Dict) -> None:
     _ensure_db_file_exists(USER_DB_FILE)
     users = []
+    user_found = False
     with open(USER_DB_FILE, 'r') as f:
         for line in f:
             if not line.strip(): continue
             existing_user = json.loads(line)
             if existing_user.get("username") == user_data.get("username"):
                 users.append(user_data)
+                user_found = True
             else:
                 users.append(existing_user)
+
+    if not user_found:
+        users.append(user_data)
 
     with open(USER_DB_FILE, 'w') as f:
         for user in users:
@@ -71,25 +76,30 @@ def get_tunnels_by_username(username: str) -> List[Dict]:
     return tunnels
 
 # node management yaay
-def upsert_node(node_data: Dict) -> None:
+def upsert_node(node_data: Dict):
     _ensure_db_file_exists(NODE_DB_FILE)
     nodes = get_all_nodes()
 
-    found = False
-    for i, node in enumerate(nodes):
-        if node.get("node_id") == node_data.get("node_id"):
-            existing_status = nodes[i].get("status", "pending")
-            nodes[i].update(node_data)
-            nodes[i]["status"] = existing_status
-            found = True; break
+    node_id_to_find = node_data.get("node_id")
+    found_node_index = -1
+    for i, existing_node in enumerate(nodes):
+        if existing_node.get("node_id") == node_id_to_find:
+            found_node_index = i
+            break
 
-    if not found:
+    if found_node_index != -1:
+        node_to_update = nodes[found_node_index]
+        node_to_update['last_seen_at'] = node_data.get('last_seen_at')
+        node_to_update['verified_ip_address'] = node_data.get('verified_ip_address')
+        node_to_update['verified_geolocation'] = node_data.get('verified_geolocation')
+
+    else:
         node_data["status"] = "pending"
         nodes.append(node_data)
 
-    with open(NODE_DB_FILE, 'w') as f:
+    with open(NODE_DB_FILE, "w") as f:
         for node in nodes:
-            f.write(json.dumps(node) + '\n')
+            f.write(json.dumps(node) + "\n")
 
 def get_node_by_id(node_id: str) -> Optional[Dict]:
     nodes = get_all_nodes()

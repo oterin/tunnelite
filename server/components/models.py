@@ -7,6 +7,10 @@ class UserCreate(BaseModel):
     username: str
     password: str
 
+class User(BaseModel):
+    username: str
+    api_key: str
+
 class Token(BaseModel):
     api_key: str
     token_type: str = "bearer"
@@ -42,6 +46,6 @@ class Node(BaseModel):
     reported_location: str | None = None
     public_address: str | None = None
     verified_ip_address: str | None = None
-    verified_geolocation: str | None = None
+    verified_geolocation: dict | None = None
     verified_geolocation_verified_at: dict | None = None
     last_seen_at: float | None = None
