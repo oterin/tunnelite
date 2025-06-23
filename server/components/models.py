@@ -35,3 +35,13 @@ class NodeInfoPublic(BaseModel):
     node_id: str
     location: str
     public_address: str
+
+class Node(BaseModel):
+    node_id: str
+    status: str
+    reported_location: str | None = None
+    public_address: str | None = None
+    verified_ip_address: str | None = None
+    verified_geolocation: str | None = None
+    verified_geolocation_verified_at: dict | None = None
+    last_seen_at: float | None = None

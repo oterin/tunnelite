@@ -1,2 +1,4 @@
 fastapi[all]
 passlib[bcrypt]
+python-dotenv
+requests
