@@ -1,10 +1,14 @@
 import time
 import requests
-from fastapi import FastAPI, HTTPException
+import json
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request as FastAPIRequest, Response
+from pydantic import BaseModel
 import uvicorn
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from tunnel_node import config
+from . import config
 
 app = FastAPI(
     title=f"tunnelite node - {config.NODE_ID}",
@@ -14,7 +18,6 @@ app = FastAPI(
 node_status = "pending"
 
 async def heartbeat_task():
-    """A background task that sends a heartbeat to the main server every 60 seconds."""
     while True:
         await asyncio.sleep(60)
 
@@ -45,13 +48,11 @@ async def heartbeat_task():
 
 @app.on_event("startup")
 def on_startup():
-    """On startup, perform initial registration and start the heartbeat task."""
     register_with_main_server()
     print("starting heartbeat background task...")
     asyncio.create_task(heartbeat_task())
 
 def register_with_main_server():
-    """Performs a single registration attempt with the main server."""
     global node_status
     node_details = {
         "node_id": config.NODE_ID,
@@ -75,10 +76,46 @@ def register_with_main_server():
 
 @app.get("/health")
 async def health_check():
-    """An endpoint for the main server to check node health."""
     return {"status": "ok", "node_status": node_status}
 
 @app.get("/ping")
 async def ping():
-    """A simple endpoint for the client to measure latency."""
     return {"ack": "pong", "node_id": config.NODE_ID}
+
+BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+
+class ChallengeHandler(BaseHTTPRequestHandler):
+    challenge_key = "default_key"
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(self.challenge_key.encode('utf-8'))
+    def log_message(self, format, *args):
+        return
+
+class ChallengeRequest(BaseModel):
+    port: int
+    key: str
+
+def run_challenge_server(port, key):
+    handler = ChallengeHandler
+    handler.challenge_key = key
+    server = HTTPServer(('', port), handler)
+    server.handle_request()
+    print(f"challenge listener on port {port} finished")
+
+@app.post("/internal/setup-challenge-listener")
+async def setup_challenge_listener(req: ChallengeRequest):
+    server_thread = threading.Thread(target=run_challenge_server, args=(req.port, req.key), daemon=True)
+    server_thread.start()
+    return {"message": f"challenge listener setup initiated on port {req.port}"}
+
+@app.post("/internal/run-benchmark")
+async def benchmark_post(request: FastAPIRequest):
+    body = await request.body()
+    return Response(content=f"received {len(body)} bytes")
+
+@app.get("/internal/run-benchmark")
+async def benchmark_get():
+    return Response(content=bytes(BENCHMARK_PAYLOAD_SIZE))

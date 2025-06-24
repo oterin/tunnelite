@@ -5,8 +5,8 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from . import database
-from .auth import get_current_user
+from server.components import database
+from server.components.auth import get_current_user
 
 router = APIRouter(prefix="/tunnelite/tunnels", tags=["Tunnels"])
 
@@ -14,16 +14,6 @@ class TunnelCreate(BaseModel):
     tunnel_type: str = Field(..., description="The type of tunnel (e.g., http, tcp).")
     local_port: int = Field(..., gt=0, lt=65536, description="The local port to expose.")
     preferred_node_id: str = Field(..., description="The ID of the node selected by the client.")
-
-class Tunnel(BaseModel):
-    tunnel_id: str
-    owner_username: str
-    tunnel_type: str
-    local_port: int
-    public_url: str
-    status: str
-    created_at: float
-    node_id: str
 
 @router.post("", response_model=Tunnel, status_code=status.HTTP_201_CREATED)
 async def create_tunnel(

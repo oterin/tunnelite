@@ -4,7 +4,7 @@ import requests
 from fastapi import APIRouter, Request, BackgroundTasks
 from pydantic import BaseModel, Field
 
-from . import database
+from server.components import database
 
 router = APIRouter(prefix="/tunnelite/nodes", tags=["Nodes"])
 

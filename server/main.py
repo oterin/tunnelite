@@ -10,7 +10,8 @@ from server.components import (
     tunnels,
     nodes,
     admin,
-    internal
+    internal,
+    registration,
 )
 
 app = FastAPI(
@@ -23,6 +24,7 @@ app.include_router(tunnels.router)
 app.include_router(nodes.router)
 app.include_router(admin.router)
 app.include_router(internal.router)
+app.include_router(registration.router)
 
 @app.get("/tunnelite/users/me")
 async def me(user: auth.User = Depends(auth.get_current_user)):

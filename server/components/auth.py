@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader, OAuth2PasswordRequestForm
 
 import bcrypt
-bcrypt.__about__ = bcrypt
+bcrypt.__about__ = bcrypt # type: ignore
 
 from passlib.context import CryptContext
 from pydantic import BaseModel
