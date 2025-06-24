@@ -34,9 +34,62 @@ async def register_node(node_info: NodeInfo, request: Request, background_tasks:
     try:
         geo_response = requests.get(f"https://cathop.lat/api/lookup/ip/{verified_ip}")
         geo_response.raise_for_status()
-        node_info_dict["verified_geolocation"] = geo_response.json()
+        geo_data = geo_response.json()
+        node_info_dict["verified_geolocation"] = geo_data
+
+        # Attempt to get countryCode if country name is available
+        if "country" in geo_data and geo_data["country"]:
+            try:
+                country_name = geo_data["country"]
+                cc_response = requests.get(
+                    "https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/countries-codes/records",
+                    params={
+                        "select": "iso2_code",
+                        "where": f"label_en LIKE '%{country_name}%'"
+                    }
+                )
+                cc_response.raise_for_status()
+                cc_data = cc_response.json()
+
+                if cc_data and "results" in cc_data and len(cc_data["results"]) > 0:
+                    country_code = cc_data["results"][0]["iso2_code"].lower()
+                    node_info_dict["verified_geolocation"]["countryCode"] = country_code
+                else:
+                    # No ISO2 code found for the given country name
+                    if "countryCode_lookup_errors" not in node_info_dict["verified_geolocation"]:
+                        node_info_dict["verified_geolocation"]["countryCode_lookup_errors"] = []
+                    node_info_dict["verified_geolocation"]["countryCode_lookup_errors"].append(
+                        f"No ISO2 code found for country: '{country_name}' from OpenDataSoft."
+                    )
+
+            except requests.RequestException as e:
+                # Error fetching country code from public.opendatasoft.com
+                if "countryCode_lookup_errors" not in node_info_dict["verified_geolocation"]:
+                    node_info_dict["verified_geolocation"]["countryCode_lookup_errors"] = []
+                node_info_dict["verified_geolocation"]["countryCode_lookup_errors"].append(
+                    f"Country code lookup failed (OpenDataSoft): {str(e)}"
+                )
+            except (KeyError, IndexError) as e:
+                # Error parsing JSON response for country code
+                if "countryCode_lookup_errors" not in node_info_dict["verified_geolocation"]:
+                    node_info_dict["verified_geolocation"]["countryCode_lookup_errors"] = []
+                node_info_dict["verified_geolocation"]["countryCode_lookup_errors"].append(
+                    f"Country code JSON parsing failed (OpenDataSoft): {str(e)}"
+                )
+        else:
+            # Country name not available in the initial geolocation data
+            if "countryCode_lookup_errors" not in node_info_dict["verified_geolocation"]:
+                node_info_dict["verified_geolocation"]["countryCode_lookup_errors"] = []
+            node_info_dict["verified_geolocation"]["countryCode_lookup_errors"].append(
+                "Country name missing from initial geolocation data, cannot look up ISO2 code."
+            )
+
     except requests.RequestException as e:
+        # Initial geoip lookup from cathop.lat failed
         node_info_dict["verified_geolocation"] = {"error": str(e)}
+    except Exception as e:
+        # Catch any other unexpected errors during the entire geoip process
+        node_info_dict["verified_geolocation"] = {"error": f"An unexpected error occurred during geoip lookup: {str(e)}"}
 
     # 3. upsert node data -> database
     database.upsert_node(node_info_dict)

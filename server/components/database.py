@@ -204,3 +204,14 @@ def update_tunnel_status(tunnel_id: str, status: str) -> bool:
                 for tunnel in tunnels:
                     f.write(json.dumps(tunnel) + '\n')
     return updated
+
+def get_all_tunnels() -> List[Dict]:
+    """Retrieves all tunnels from the database."""
+    tunnels = []
+    with _get_file_lock(TUNNEL_DB_FILE):
+        if os.path.exists(TUNNEL_DB_FILE):
+            with open(TUNNEL_DB_FILE, "r") as f:
+                for line in f:
+                    if not line.strip(): continue
+                    tunnels.append(json.loads(line))
+    return tunnels

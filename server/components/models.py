@@ -18,7 +18,6 @@ class Token(BaseModel):
 class TunnelCreate(BaseModel):
     tunnel_type: str = Field(..., description="the type of tunnel (e.g., http, tcp)")
     local_port: int = Field(..., gt=0, lt=65536, description="the local port to expose")
-    preferred_node_id: str = Field(..., description="the id of the node selected by the client")
 
 class Tunnel(BaseModel):
     node_id: str
