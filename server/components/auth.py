@@ -1,6 +1,4 @@
-"""
-tunnelite auth component
-"""
+
 
 import secrets
 from typing import Dict

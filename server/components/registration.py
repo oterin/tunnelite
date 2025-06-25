@@ -10,6 +10,7 @@ import requests
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from server.components import database
+from server.logger import log
 
 router = APIRouter(tags=["node registration"])
 
@@ -91,6 +92,10 @@ async def register_node_websocket(websocket: WebSocket):
 
             await asyncio.sleep(1) # give listener a moment
             verification_url = f"http://{node_ip}:{port}"
+            log.info(
+                "Verifying node port",
+                extra={"node_secret_id": node_secret_id, "url": verification_url}
+            )
             try:
                 res = requests.get(verification_url, timeout=3)
                 if res.text != challenge_key:
@@ -117,14 +122,25 @@ async def register_node_websocket(websocket: WebSocket):
             "last_seen_at": time.time()
         }
         database.upsert_node(final_node_data)
+        log.info(
+            "Node registration successful",
+            extra={"node_secret_id": node_secret_id, "public_hostname": public_hostname}
+        )
         await websocket.send_json({"type": "success", "message": f"node verified and approved! your public hostname is: {public_hostname}"})
 
     except WebSocketDisconnect as e:
-        print(f"node registration for {node_secret_id or 'unknown'} disconnected: {e.reason}")
-    except Exception as e:
-        print(f"an error occurred during node registration for {node_secret_id or 'unknown'}: {e}")
+        log.warning(
+            "Node registration websocket disconnected",
+            extra={"node_secret_id": node_secret_id, "reason": e.reason}
+        )
+    except Exception:
+        log.error(
+            "An unexpected error occurred during node registration",
+            extra={"node_secret_id": node_secret_id},
+            exc_info=True
+        )
         if websocket.client_state.CONNECTED:
-           await websocket.send_json({"type": "failure", "message": str(e)})
+           await websocket.send_json({"type": "failure", "message": "An internal server error occurred."})
 
 def generate_unique_node_hostname(country_code: str) -> str:
     r = RandomWords()

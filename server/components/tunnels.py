@@ -45,7 +45,7 @@ def get_available_tcp_port(node: dict) -> Optional[int]:
     active_tunnels = database.get_all_tunnels()
     used_ports = set()
     for t in active_tunnels:
-        if t.get("node_id") == node["node_id"] and t.get("tunnel_type") in ["tcp", "udp"]:
+        if t.get("node_secret_id") == node["node_secret_id"] and t.get("tunnel_type") in ["tcp", "udp"]:
             try:
                 port = int(t["public_url"].split(":")[1])
                 used_ports.add(port)
@@ -63,24 +63,34 @@ def get_available_tcp_port(node: dict) -> Optional[int]:
 def find_best_node(tunnel_type: str, preferred_country: str) -> Optional[tuple]:
     all_nodes = database.get_active_nodes()
 
-    # add load information to each node
+    # filter out nodes that are under high system load
+    eligible_nodes = []
     for node in all_nodes:
+        metrics = node.get("metrics", {})
+        cpu = metrics.get("cpu_percent", 0)
+        memory = metrics.get("memory_percent", 0)
+        if cpu < 90 and memory < 90:
+            eligible_nodes.append(node)
+
+    # add load information to each node
+    for node in eligible_nodes:
         active_tunnels = [
             t for t in database.get_all_tunnels()
             if (
-                t.get("node_id") == node.get("node_id") and
+                t.get("node_secret_id") == node.get("node_secret_id") and
                 t.get("status") == "active"
             )
         ]
-
         node["current_load"] = len(active_tunnels)
+        # also add a score for sorting, lower is better
+        node["score"] = (node["current_load"] * 0.5) + (node.get("metrics", {}).get("cpu_percent", 0) * 0.5)
 
-    # sort nodes by load to always check the least busy ones first
-    all_nodes.sort(key=lambda x: x["current_load"])
+    # sort nodes by score to always check the least busy ones first
+    eligible_nodes.sort(key=lambda x: x["score"])
 
     # 1. try to find an ideal node in the preferred country
     nodes_in_country = [
-        n for n in all_nodes
+        n for n in eligible_nodes
         if (
             n.get("verified_geolocation", {})
              .get("countryCode", "")
@@ -98,7 +108,7 @@ def find_best_node(tunnel_type: str, preferred_country: str) -> Optional[tuple]:
                     return (node, port)
 
     # 2. fallback - find any available node if none were found in the preferred country
-    for node in all_nodes:
+    for node in eligible_nodes:
         if node["current_load"] < node.get("max_clients", 0):
             if tunnel_type in ["http", "https"]:
                 return (node, None)
@@ -155,7 +165,7 @@ async def create_tunnel(
         )
 
     # 3. create new tunnel and save the record
-    new_tunnel = {
+    new_tunnel_data = {
         "tunnel_id": secrets.token_hex(16),
         "owner_username": username,
         "tunnel_type": tunnel_request.tunnel_type,
@@ -163,17 +173,59 @@ async def create_tunnel(
         "public_url": public_url,
         "status": "pending",
         "created_at": time.time(),
-        "node_id": best_node["node_id"]
+        "node_secret_id": best_node["node_secret_id"], # internal link to the node
     }
+    database.save_tunnel(new_tunnel_data)
 
-    database.save_tunnel(new_tunnel)
-    return new_tunnel
+    # construct the public-facing response model, ensuring no secret ids are exposed
+    response_tunnel = new_tunnel_data.copy()
+    response_tunnel["public_hostname"] = node_hostname
+    del response_tunnel["node_secret_id"]
+
+    return response_tunnel
 
 @router.get("", response_model=List[Tunnel])
 async def list_user_tunnels(current_user: dict = Depends(get_current_user)):
     username = current_user.get("username")
     if not username:
-        raise HTTPException(status_code=403, detail="Could not validate user.")
+        raise HTTPException(status_code=403, detail="could not validate user.")
 
-    user_tunnels = database.get_tunnels_by_username(username)
-    return user_tunnels
+    # create a map of node secret ids to public hostnames for efficient lookup
+    nodes_map = {
+        node["node_secret_id"]: node.get("public_hostname")
+        for node in database.get_all_nodes()
+    }
+
+    user_tunnels_data = database.get_tunnels_by_username(username)
+
+    # build the response, adding public_hostname and ensuring no secrets are leaked
+    response_tunnels = []
+    for tunnel in user_tunnels_data:
+        response_tunnel = tunnel.copy()
+        node_secret_id = response_tunnel.pop("node_secret_id", None)
+        response_tunnel["public_hostname"] = nodes_map.get(node_secret_id, "unknown-node")
+        response_tunnels.append(response_tunnel)
+
+    return response_tunnels
+
+@router.delete("/{tunnel_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_tunnel(
+    tunnel_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    # allows a user to delete their own tunnel
+    tunnel = database.get_tunnel_by_id(tunnel_id)
+    if not tunnel:
+        # if the tunnel doesn't exist, it's effectively deleted
+        return
+
+    if tunnel.get("owner_username") != current_user.get("username"):
+        # users can only delete their own tunnels
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to delete this tunnel."
+        )
+
+    database.update_tunnel_status(tunnel_id, "deleted_by_user")
+# in a future step, we would also notify the node to tear down the tunnel in real-time
+    return

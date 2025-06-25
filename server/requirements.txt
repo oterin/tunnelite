@@ -4,3 +4,5 @@ python-dotenv
 requests
 websockets
 random-word
+slowapi
+python_json_logger

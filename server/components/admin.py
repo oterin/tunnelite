@@ -20,7 +20,7 @@ load_dotenv()
 
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
-    raise ValueError("TUNNELITE_ADMIN_KEY environment variable is not set")
+    raise ValueError("tunnelite_admin_key environment variable is not set")
 
 api_key_header = APIKeyHeader(
     name="X-Admin-Key",
@@ -48,20 +48,20 @@ async def list_all_nodes():
     return database.get_all_nodes()
 
 @router.post(
-    "/nodes/{node_id}/approve",
+    "/nodes/{public_hostname}/approve",
     status_code=status.HTTP_200_OK
 )
-async def approve_node(node_id: str) -> dict:
-    node = database.get_node_by_id(node_id)
+async def approve_node(public_hostname: str) -> dict:
+    node = database.get_node_by_hostname(public_hostname)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="node not found"
         )
 
-    if database.update_node_status(node_id, "approved"):
+    if database.update_node_status(node["node_secret_id"], "approved"):
         return {
-            "message": f"node '{node_id}' approved"
+            "message": f"node '{public_hostname}' approved"
         }
 
     raise HTTPException(
@@ -70,20 +70,20 @@ async def approve_node(node_id: str) -> dict:
     )
 
 @router.post(
-    "/nodes/{node_id}/disable",
+    "/nodes/{public_hostname}/disable",
     status_code=status.HTTP_200_OK
 )
-async def disable_node(node_id: str) -> dict:
-    node = database.get_node_by_id(node_id)
+async def disable_node(public_hostname: str) -> dict:
+    node = database.get_node_by_hostname(public_hostname)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="node not found"
         )
 
-    if database.update_node_status(node_id, "disabled"):
+    if database.update_node_status(node["node_secret_id"], "disabled"):
         return {
-            "message": f"node '{node_id}' disabled"
+            "message": f"node '{public_hostname}' disabled"
         }
 
     raise HTTPException(

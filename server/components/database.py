@@ -1,6 +1,4 @@
-"""
-tunnelite db component
-"""
+
 
 import json
 import os
@@ -87,7 +85,6 @@ def get_tunnels_by_username(username: str) -> List[Dict]:
     return tunnels
 
 def upsert_node(node_data: Dict):
-    """Safely creates or updates a node record using its secret ID."""
     _ensure_db_file_exists(NODE_DB_FILE)
     lock = FileLock(f"{NODE_DB_FILE}.lock")
     with lock:
@@ -108,6 +105,18 @@ def upsert_node(node_data: Dict):
             for node in nodes:
                 f.write(json.dumps(node) + "\n")
 
+def get_node_by_id(node_id: str) -> Optional[Dict]:
+    _ensure_db_file_exists(NODE_DB_FILE)
+    lock = FileLock(f"{NODE_DB_FILE}.lock")
+    with lock:
+        with open(NODE_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    node = json.loads(line)
+                    if node.get("node_id") == node_id:
+                        return node
+    return None
+
 def get_node_by_secret_id(node_secret_id: str) -> Optional[Dict]:
     _ensure_db_file_exists(NODE_DB_FILE)
     lock = FileLock(f"{NODE_DB_FILE}.lock")
@@ -117,6 +126,18 @@ def get_node_by_secret_id(node_secret_id: str) -> Optional[Dict]:
                 if line.strip():
                     node = json.loads(line)
                     if node.get("node_secret_id") == node_secret_id:
+                        return node
+    return None
+
+def get_node_by_hostname(public_hostname: str) -> Optional[Dict]:
+    _ensure_db_file_exists(NODE_DB_FILE)
+    lock = FileLock(f"{NODE_DB_FILE}.lock")
+    with lock:
+        with open(NODE_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    node = json.loads(line)
+                    if node.get("public_hostname") == public_hostname:
                         return node
     return None
 
@@ -144,7 +165,6 @@ def update_node_status(node_secret_id: str, status: str) -> bool:
     return updated
 
 def get_all_nodes(locked: bool = False) -> List[Dict]:
-    """Retrieves all nodes. Can be called from within a lock to avoid re-locking."""
     _ensure_db_file_exists(NODE_DB_FILE)
 
     def _read_nodes():
@@ -166,7 +186,7 @@ def get_active_nodes() -> List[Dict]:
     all_nodes = get_all_nodes() # this will acquire its own lock if not already locked
     active_nodes = []
 
-    # if da node didnt erport uthath is u hactive in 2 mintues, it dead gng
+    # if the node didnt report that it is active in 2 minutes, it is dead
     two_minutes_ago = time.time() - 120
 
     for node in all_nodes:
@@ -214,7 +234,6 @@ def update_tunnel_status(tunnel_id: str, status: str) -> bool:
     return updated
 
 def get_all_tunnels() -> List[Dict]:
-    """Retrieves all tunnels from the database."""
     _ensure_db_file_exists(TUNNEL_DB_FILE)
     tunnels = []
     lock = FileLock(f"{TUNNEL_DB_FILE}.lock")

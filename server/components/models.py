@@ -20,7 +20,7 @@ class TunnelCreate(BaseModel):
     local_port: int = Field(..., gt=0, lt=65536, description="the local port to expose")
 
 class Tunnel(BaseModel):
-    node_id: str
+    public_hostname: str # the public name of the node serving the tunnel
     tunnel_id: str
     owner_username: str
     tunnel_type: str
@@ -30,17 +30,19 @@ class Tunnel(BaseModel):
     created_at: float
 
 class NodeInfo(BaseModel):
-    node_id: str
-    location: str
+    node_secret_id: str # the private identifier for the node
+    public_address: str
+    metrics: Optional[dict] = None
     last_seen_at: float = Field(default_factory=time.time)
 
 class NodeInfoPublic(BaseModel):
-    node_id: str
+    public_hostname: str # the public name of the node
     location: str
     public_address: str
 
 class Node(BaseModel):
-    node_id: str
+    node_secret_id: str # the private identifier
+    public_hostname: str | None = None # the public name
     status: str
     reported_location: str | None = None
     public_address: str | None = None
@@ -52,7 +54,7 @@ class Node(BaseModel):
 class ActivationRequest(BaseModel):
     tunnel_id: str
     api_key: str
-    node_id: str
+    node_secret_id: str # the node must identify itself with its secret id
 
 class DeactivationRequest(BaseModel):
-    node_id: str
+    node_secret_id: str

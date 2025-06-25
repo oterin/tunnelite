@@ -8,6 +8,7 @@ import uvicorn
 import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import psutil
 
 from . import config
 
@@ -24,7 +25,7 @@ except FileNotFoundError:
     print(f"generated new node secret id: {node_secret_id}")
 
 app = FastAPI(
-    title=f"tunnelite node - {config.NODE_ID}",
+    title=f"tunnelite node",
     version="0.1.0"
 )
 
@@ -35,9 +36,17 @@ async def heartbeat_task():
         await asyncio.sleep(60)
 
         global node_status
+        # Get system metrics using psutil
+        cpu_percent = psutil.cpu_percent()
+        memory_info = psutil.virtual_memory()
+
         node_details = {
             "node_secret_id": node_secret_id,
             "public_address": config.NODE_PUBLIC_ADDRESS,
+            "metrics": {
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory_info.percent,
+            },
         }
 
         try:
@@ -91,7 +100,7 @@ async def health_check():
 
 @app.get("/ping")
 async def ping():
-    return {"ack": "pong", "node_id": config.NODE_ID}
+    return {"ack": "pong", "node_secret_id": node_secret_id}
 
 benchmark_payload_size = 10 * 1024 * 1024  # 10 mb
 
@@ -151,5 +160,5 @@ async def websocket_endpoint(websocket: WebSocket):
         activation_payload = {
             "tunnel_id": tunnel_id_for_this_connection,
             "api_key": message.get("api_key"),
-            "node_id": config.NODE_ID
+            "node_secret_id": node_secret_id
         }
