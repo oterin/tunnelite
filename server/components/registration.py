@@ -4,6 +4,7 @@ import random
 import secrets
 import time
 from typing import List
+from random_word import RandomWords
 
 import requests
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -98,10 +99,14 @@ async def register_node_websocket(websocket: WebSocket):
             except Exception as e:
                 raise WebSocketDisconnect(code=1011, reason=f"Failed to verify port {port}: {e}")
 
-        # 5. final Approval
+        # 5. final approval
+        country_code = database.get_node_by_id(node_id).get("verified_geolocation", {}).get("countryCode", "local") # type: ignore
+        node_hostname = generate_unique_node_hostname(country_code)
+
         final_node_data = {
             "node_id": node_id,
             "status": "approved",
+            "public_hostname": node_hostname,
             "max_clients": int(max_clients),
             "port_range": port_range_str,
             "bandwidth_down_mbps": round(down_mbps, 2),
@@ -117,3 +122,19 @@ async def register_node_websocket(websocket: WebSocket):
         print(f"an error occurred during node registration for {node_id or 'unknown'}: {e}")
         if websocket.client_state.CONNECTED:
            await websocket.send_json({"type": "failure", "message": str(e)})
+
+def generate_unique_node_hostname(country_code: str) -> str:
+    r = RandomWords()
+    for _ in range(20):
+        word = r.get_random_word()
+        hostname = f"{word}.{country_code}"
+        # there's no shot there's a node with this fragment
+        # but if we put an infinite amount of monkeys in an
+        # infinitely large room with ininite typewriters
+        # eventually it is bound to create all the works of
+        # shakespeare so i'd err on the side of caution 🤷🏻‍♂️
+        if not any(hostname == n.get("public_hostname") for n in database.get_all_nodes()):
+            return hostname
+
+    # let's fallback to a random string
+    return f"{secrets.token_hex(6)}.{country_code}"

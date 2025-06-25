@@ -6,6 +6,7 @@ from typing import List, Optional
 import requests
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from random_word import RandomWords
+from server.components.registration import parse_port_range
 
 from server.components import database
 from server.components.models import *
@@ -58,21 +59,33 @@ def find_best_node_for_country(country_code: str) -> Optional[dict]:
     eligible_nodes.sort(key=lambda n: n["current_load"])
     return eligible_nodes[0]
 
-def generate_unique_subdomain(country_code: str) -> str:
-    r = RandomWords()
-    for _ in range(10):
-        word = r.get_random_word()
-        subdomain = f"{word}.{country_code}"
-        # there's no shot there's a node with this fragment
-        # but if we put an infinite amount of monkeys in an
-        # infinitely large room with ininite typewriters
-        # eventually it is bound to create all the works of
-        # shakespeare so i'd err on the side of caution 🤷🏻‍♂️
-        if not any(subdomain in t.get("public_url", "") for t in database.get_all_tunnels()):
-            return subdomain
+def get_available_tcp_port(node: dict) -> Optional[int]:
+    try:
+        port_range = parse_port_range(node.get("port_range", ""))
+    except AttributeError:
+        port_range = []
 
-    # let's fallback to a random string
-    return f"{secrets.token_hex(4)}.{country_code}"
+    if not port_range:
+        return None
+
+    # get all ports currently used by tcp/udp tunnels
+    active_tunnels = database.get_all_tunnels()
+    used_ports = set()
+    for t in active_tunnels:
+        if t.get("node_id") == node["node_id"] and t.get("tunnel_type") in ["tcp", "udp"]:
+            try:
+                port = int(t["public_url"].split(":")[1])
+                used_ports.add(port)
+            except (IndexError, ValueError):
+                continue
+
+    # find a free port within the range
+    for port in port_range:
+        if port not in used_ports:
+            return port
+
+    # no free ports found, rip in pieces.
+    return None
 
 @router.post("", response_model=Tunnel, status_code=status.HTTP_201_CREATED)
 async def create_tunnel(
@@ -81,27 +94,45 @@ async def create_tunnel(
     current_user: dict = Depends(get_current_user),
 ):
     username = current_user.get("username")
-    client_ip = request.client.host # type: ignore
 
-    # 1. determine user's location
-    country_code = get_country_code(client_ip)
-    if not country_code:
-        raise HTTPException(
-            status_code=500,
-            detail="could not determine user location"
-        )
-
+    # 1. find the best node for the user
+    country_code = get_country_code_from_ip(request.client.host) # type: ignore
     best_node = find_best_node_for_country(country_code)
     if not best_node:
         raise HTTPException(
             status_code=503,
-            detail="the entire fucking global infrastructure is at capacity. consider adding nodes?"
+            detail="the entire fucking global infrastructure is at capacity. please wait, or consider contributing a node so this won't happen again?"
         )
 
-    # generate a unique public url for the tunnel
-    subdomain = generate_unique_subdomain(country_code)
-    public_url = f"http://{subdomain}.tunnelite.ws"
+    node_hostname = best_node.get("public_hostname")
+    if not node_hostname:
+        raise HTTPException(
+            status_code=500,
+            detail="the selected node doesn't have a public hostname. how? idk. please contact support."
+        )
 
+    # 2. generate the correct public url based on tunnel type
+    public_url = ""
+    if tunnel_request.tunnel_type in ["http", "https"]:
+        # unique user-facing subdomain on the hostname of the node
+        user_subdomain = f"{secrets.token_hex(4)}-{secrets.token_hex(2)}"
+        public_url = f"{tunnel_request.tunnel_type}://{user_subdomain}.{node_hostname}"
+    elif tunnel_request.tunnel_type in ["tcp", "udp"]:
+        # unique port :)
+        port = get_available_tcp_port(best_node)
+        if not port:
+            raise HTTPException(
+                status_code=503,
+                detail=f"node '{best_node['id']}' is at capacity. please wait, or consider contributing a node so this won't happen again?"
+            )
+        public_url = f"{tunnel_request.tunnel_type}://{node_hostname}:{port}"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid tunnel type"
+        )
+
+    # 3. create and save the new tunnel record
     new_tunnel = {
         "tunnel_id": secrets.token_hex(16),
         "owner_username": username,
@@ -110,14 +141,13 @@ async def create_tunnel(
         "public_url": public_url,
         "status": "pending",
         "created_at": time.time(),
-        "node_id": best_node["node_id"],
-        "total_bandwidth_in": 0,
-        "total_bandwidth_out": 0,
-        "connected_clients": [],
+        "node_id": best_node["node_id"]
     }
 
     database.save_tunnel(new_tunnel)
     return new_tunnel
+
+
 
 @router.get("", response_model=List[Tunnel])
 async def list_user_tunnels(current_user: dict = Depends(get_current_user)):
