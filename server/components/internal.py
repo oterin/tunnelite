@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
+from requests.models import HTTPError
 
 from server.components import database
 from server.components.models import *
@@ -46,3 +47,34 @@ async def verify_tunnel_activation(req: ActivationRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="failed to activate tunnel"
         )
+
+@router.post("/tunnels/{tunnel_id}/deactivate")
+async def deactivate_tunnel(
+    tunnel_id: str,
+    req: DeactivationRequest
+):
+    # 1. verify the tunnel exists and the node is legitimate
+    tunnel = database.get_tunnel_by_id(tunnel_id)
+    if not tunnel:
+        return {
+            "status": "ok",
+            "message": "tunnel already deleted or never existed"
+        }
+
+    if tunnel.get("node_id") != req.node_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="node is not authorized to modify this tunnel"
+        )
+
+    # 2. update the status to 'inactive' (instead of deleting to preserve history)
+    if database.update_tunnel_status(tunnel_id, "inactive"):
+        return {
+            "status": "ok",
+            "message": "tunnel deactivated"
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="failed to update tunnel status"
+    )

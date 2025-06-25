@@ -31,22 +31,22 @@ def parse_port_range(range_str: str) -> List[int]:
 @router.websocket("/ws/register-node")
 async def register_node_websocket(websocket: WebSocket):
     await websocket.accept()
-    node_ip = websocket.client.host # type: ignore
-    node_id = None
+    node_secret_id = None
 
     try:
         # 1. initial handshake
         data = await websocket.receive_json()
-        node_id = data.get("node_id")
-        if not node_id:
-            raise WebSocketDisconnect(code=1008, reason="node_id is required.")
+        node_secret_id = data.get("node_secret_id")
+        if not node_secret_id:
+            raise WebSocketDisconnect(code=1008, reason="node_secret_id is required.")
 
-        node_record = database.get_node_by_id(node_id)
+        node_record = database.get_node_by_secret_id(node_secret_id)
         if not node_record or not node_record.get("public_address"):
-            raise WebSocketDisconnect(code=1008, reason=f"node '{node_id}' has not registered its public_address yet. ensure the node is running and has sent a heartbeat.")
+            raise WebSocketDisconnect(code=1008, reason=f"node has not registered its public_address yet. ensure the node is running and has sent a heartbeat.")
 
         node_api_url = node_record["public_address"]
-        database.upsert_node({"node_id": node_id, "status": "benchmarking", "verified_ip_address": node_ip})
+        node_ip = websocket.client.host # type: ignore
+        database.upsert_node({"node_secret_id": node_secret_id, "status": "benchmarking", "verified_ip_address": node_ip})
 
         # 2. bandwidth benchmark
         await websocket.send_json({"type": "benchmark", "payload_size": BENCHMARK_PAYLOAD_SIZE})
@@ -74,7 +74,7 @@ async def register_node_websocket(websocket: WebSocket):
         await websocket.send_json({"type": "prompt", "message": f"we recommend a maximum of {recommendation} clients. enter max concurrent clients:"})
         max_clients = (await websocket.receive_json())["response"]
 
-        await websocket.send_json({"type": "prompt", "message": "enter public port range for TCP/UDP tunnels (e.g., 3000-4000; 5001):"})
+        await websocket.send_json({"type": "prompt", "message": "enter public port range for tcp/udp tunnels (e.g., 3000-4000; 5001):"})
         port_range_str = (await websocket.receive_json())["response"]
         ports_to_verify = parse_port_range(port_range_str)
 
@@ -97,16 +97,19 @@ async def register_node_websocket(websocket: WebSocket):
                     raise ValueError("incorrect key returned")
                 await websocket.send_json({"type": "info", "message": f"port {port} verified."})
             except Exception as e:
-                raise WebSocketDisconnect(code=1011, reason=f"Failed to verify port {port}: {e}")
+                raise WebSocketDisconnect(code=1011, reason=f"failed to verify port {port}: {e}")
 
         # 5. final approval
-        country_code = database.get_node_by_id(node_id).get("verified_geolocation", {}).get("countryCode", "local") # type: ignore
-        node_hostname = generate_unique_node_hostname(country_code)
+        # get country code from the verified geoip data already in the db
+        geo_info = node_record.get("verified_geolocation", {})
+        country_code = geo_info.get("countryCode", "local").lower()
+
+        public_hostname = generate_unique_node_hostname(country_code)
 
         final_node_data = {
-            "node_id": node_id,
+            "node_secret_id": node_secret_id,
+            "public_hostname": public_hostname, # the official, server-assigned name
             "status": "approved",
-            "public_hostname": node_hostname,
             "max_clients": int(max_clients),
             "port_range": port_range_str,
             "bandwidth_down_mbps": round(down_mbps, 2),
@@ -114,12 +117,12 @@ async def register_node_websocket(websocket: WebSocket):
             "last_seen_at": time.time()
         }
         database.upsert_node(final_node_data)
-        await websocket.send_json({"type": "success", "message": "node fully verified and approved!"})
+        await websocket.send_json({"type": "success", "message": f"node verified and approved! your public hostname is: {public_hostname}"})
 
     except WebSocketDisconnect as e:
-        print(f"node registration for {node_id or 'unknown'} disconnected: {e.reason}")
+        print(f"node registration for {node_secret_id or 'unknown'} disconnected: {e.reason}")
     except Exception as e:
-        print(f"an error occurred during node registration for {node_id or 'unknown'}: {e}")
+        print(f"an error occurred during node registration for {node_secret_id or 'unknown'}: {e}")
         if websocket.client_state.CONNECTED:
            await websocket.send_json({"type": "failure", "message": str(e)})
 

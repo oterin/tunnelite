@@ -53,3 +53,6 @@ class ActivationRequest(BaseModel):
     tunnel_id: str
     api_key: str
     node_id: str
+
+class DeactivationRequest(BaseModel):
+    node_id: str

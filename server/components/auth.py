@@ -5,8 +5,10 @@ tunnelite auth component
 import secrets
 from typing import Dict
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import APIKeyHeader, OAuth2PasswordRequestForm
+
+from server.ratelimit import limiter
 
 import bcrypt
 bcrypt.__about__ = bcrypt # type: ignore
@@ -54,7 +56,8 @@ async def get_current_user(api_key: str = Depends(api_key_header)) -> Dict:
 
 # api endpoints
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register_user(user: UserCreate) -> Dict:
+@limiter.limit("5/hour")
+async def register_user(user: UserCreate, request: Request) -> Dict:
     existing_user = database.find_user_by_username(user.username)
     if existing_user:
         raise HTTPException(
@@ -75,7 +78,8 @@ async def register_user(user: UserCreate) -> Dict:
     return {"message": "user registered successfully"}
 
 @router.post("/token", response_model=Token)
-async def login_for_api_key(form_data: OAuth2PasswordRequestForm = Depends()) -> Token:
+@limiter.limit("10/minute")
+async def login_for_api_key(request: Request, form_data: OAuth2PasswordRequestForm = Depends()) -> Token:
     user = database.find_user_by_username(form_data.username)
     if not user or not verify_password(form_data.password, user["password"]):
         raise HTTPException(
@@ -87,7 +91,8 @@ async def login_for_api_key(form_data: OAuth2PasswordRequestForm = Depends()) ->
     return Token(api_key=user["api_key"])
 
 @router.patch("/token", response_model=Token)
-async def refresh_api_key(current_user: Dict = Depends(get_current_user)) -> Token:
+@limiter.limit("5/minute")
+async def refresh_api_key(request: Request, current_user: Dict = Depends(get_current_user)) -> Token:
     new_api_key = secrets.token_hex(32)
     current_user["api_key"] = new_api_key
     database.save_user(current_user)

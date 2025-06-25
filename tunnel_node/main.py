@@ -1,6 +1,7 @@
 import time
 import requests
 import json
+import uuid
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request as FastAPIRequest, Response
 from pydantic import BaseModel
 import uvicorn
@@ -9,6 +10,18 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from . import config
+
+secret_id_file = "node_secret_id.txt"
+node_secret_id = None
+try:
+    with open(secret_id_file, "r") as f:
+        node_secret_id = f.read().strip()
+    print(f"loaded existing node secret id: {node_secret_id}")
+except FileNotFoundError:
+    node_secret_id = str(uuid.uuid4())
+    with open(secret_id_file, "w") as f:
+        f.write(node_secret_id)
+    print(f"generated new node secret id: {node_secret_id}")
 
 app = FastAPI(
     title=f"tunnelite node - {config.NODE_ID}",
@@ -23,8 +36,7 @@ async def heartbeat_task():
 
         global node_status
         node_details = {
-            "node_id": config.NODE_ID,
-            "location": config.NODE_LOCATION,
+            "node_secret_id": node_secret_id,
             "public_address": config.NODE_PUBLIC_ADDRESS,
         }
 
@@ -55,8 +67,7 @@ def on_startup():
 def register_with_main_server():
     global node_status
     node_details = {
-        "node_id": config.NODE_ID,
-        "location": config.NODE_LOCATION,
+        "node_secret_id": node_secret_id,
         "public_address": config.NODE_PUBLIC_ADDRESS,
     }
     print(f"registering with main server at {config.MAIN_SERVER_URL}...")
@@ -82,7 +93,7 @@ async def health_check():
 async def ping():
     return {"ack": "pong", "node_id": config.NODE_ID}
 
-BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+benchmark_payload_size = 10 * 1024 * 1024  # 10 mb
 
 class ChallengeHandler(BaseHTTPRequestHandler):
     challenge_key = "default_key"
@@ -118,4 +129,27 @@ async def benchmark_post(request: FastAPIRequest):
 
 @app.get("/internal/run-benchmark")
 async def benchmark_get():
-    return Response(content=bytes(BENCHMARK_PAYLOAD_SIZE))
+    return Response(content=bytes(benchmark_payload_size))
+
+@app.websocket("/ws/connect")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+
+    tunnel_id_for_this_connection = None
+    try:
+        # 1. activation handshake
+        message_str = await websocket.receive_text()
+        message = json.loads(message_str)
+
+        if message.get("type") != "activate":
+            await websocket.send_json({
+                    "error": "first message must be an activation request"
+                })
+            raise WebSocketDisconnect()
+
+        tunnel_id_for_this_connection = message.get("tunnel_id")
+        activation_payload = {
+            "tunnel_id": tunnel_id_for_this_connection,
+            "api_key": message.get("api_key"),
+            "node_id": config.NODE_ID
+        }

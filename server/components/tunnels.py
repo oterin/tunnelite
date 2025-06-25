@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from server.ratelimit import limiter
 from random_word import RandomWords
 from server.components.registration import parse_port_range
 
@@ -114,6 +115,7 @@ def find_best_node(tunnel_type: str, preferred_country: str) -> Optional[tuple]:
 
 
 @router.post("", response_model=Tunnel, status_code=status.HTTP_201_CREATED)
+@limiter.limit("20/hour")
 async def create_tunnel(
     request: Request,
     tunnel_request: TunnelCreate,
