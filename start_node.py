@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import ssl
 import sys
 import pwd
 import grp
@@ -99,11 +100,12 @@ async def run_interactive_registration(node_secret_id: str):
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
     # construct the secure websocket uri
-    ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
+    ws_uri = MAIN_SERVER_URL.replace("https", "wss").replace("http", "ws") + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
 
     try:
+        # always use ssl=True for wss:// connections
         async with websockets.connect(ws_uri, ssl=True) as websocket:
             print(f"authenticating with node secret id: {node_secret_id}")
             await websocket.send(json.dumps({
@@ -115,8 +117,12 @@ async def run_interactive_registration(node_secret_id: str):
                 message_str = await websocket.recv()
                 try:
                     message = json.loads(message_str)
-                    if not isinstance(message, dict): continue
-                except json.JSONDecodeError: continue
+                    if not isinstance(message, dict):
+                        print(f"warn:     received non-dict message from server: {message_str}")
+                        continue
+                except json.JSONDecodeError:
+                    print(f"warn:     received malformed json from server: {message_str}")
+                    continue
 
                 msg_type = message.get("type")
 
@@ -150,6 +156,8 @@ async def run_interactive_registration(node_secret_id: str):
                 elif msg_type == "failure":
                     print(f"\n[server] failed: {message.get('message', 'registration failed.')}")
                     return False
+                else:
+                    print(f"warn:     received unknown message type '{msg_type}' from server.")
     except Exception as e:
         print(f"an unexpected error occurred during registration: {e}")
         return False
@@ -175,6 +183,7 @@ def start_worker_process(https_socket: socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
+    # these must be imported *after* forking to prevent event loop conflicts.
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
@@ -196,6 +205,7 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
+        # always bind to localhost for the temporary server for security
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
         from tunnel_node.main import app as temp_app

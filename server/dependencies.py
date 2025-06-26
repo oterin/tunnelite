@@ -15,13 +15,17 @@ class HTTPSRedirectMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next):
-        if request.headers.get("x-forwarded-proto") != "https":
-            # also check the direct scheme for local development or direct connections
-            if request.url.scheme != "https":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="insecure connections are not allowed. please use https.",
-                )
+            # ignore websockets, as they have their own wss:// security scheme.
+            if "websocket" in request.scope["type"]:
+                return await call_next(request)
 
-        response = await call_next(request)
-        return response
+            if request.headers.get("x-forwarded-proto") != "https":
+                # also check the direct scheme for local development or direct connections
+                if request.url.scheme != "https":
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="insecure connections are not allowed. please use https.",
+                    )
+
+            response = await call_next(request)
+            return response
