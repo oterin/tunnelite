@@ -26,7 +26,7 @@ KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
 
 # main server url is configured via environment variable
-MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net:8220")
+MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net:443")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
 
