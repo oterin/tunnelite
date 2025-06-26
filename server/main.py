@@ -22,18 +22,20 @@ from server.components import (
 )
 from server import garbage_collector, dependencies
 
+# prepare global dependencies
+global_dependencies = []
+if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
+    global_dependencies.append(Depends(dependencies.enforce_https))
+
 app = FastAPI(
     title="tunnelite backend",
     description="we tunnelin data in here",
     version="0.1.0",
+    dependencies=global_dependencies,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
-
-# this dependency will enforce https on all routes if enabled
-if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
-    app.dependencies.append(Depends(dependencies.enforce_https))
 
 app.include_router(auth.router)
 app.include_router(tunnels.router)
