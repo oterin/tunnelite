@@ -25,8 +25,8 @@ from server import garbage_collector, dependencies
 # prepare global dependencies
 global_dependencies = []
 if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
-    # for global app dependencies, you pass the function directly.
-    global_dependencies.append(dependencies.enforce_https)
+        # for global app dependencies, you must wrap the function in depends().
+        global_dependencies.append(Depends(dependencies.enforce_https))
 
 app = FastAPI(
     title="tunnelite backend",
