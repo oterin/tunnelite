@@ -56,8 +56,8 @@ class ConnectionManager:
             connection.bytes_in += len(data)
             await connection.websocket.send_bytes(data)
 
-    async def get_response_from_client(self, public_hostname: str, timeout: int = 10) -> bytes:
-        """waits for a response to come back from the client for a specific tunnel."""
+    async def get_http_response_from_client(self, public_hostname: str, timeout: int = 10) -> bytes:
+        """waits for a single http response to come back from the client for a specific tunnel."""
         if public_hostname in self.tunnels_by_hostname:
             connection = self.tunnels_by_hostname[public_hostname]
             try:
@@ -66,6 +66,10 @@ class ConnectionManager:
             except asyncio.TimeoutError:
                 return b"HTTP/1.1 504 Gateway Timeout\r\n\r\nTunnel Timeout"
         return b"HTTP/1.1 404 Not Found\r\n\r\nTunnel Not Found"
+
+    def get_connection_by_id(self, tunnel_id: str) -> Optional[Connection]:
+        """retrieves an active connection object by its tunnel id."""
+        return self.tunnels_by_id.get(tunnel_id)
 
     async def forward_to_proxy(self, tunnel_id: str, data: bytes):
         """forwards a response from the client back to the proxy server via the queue."""

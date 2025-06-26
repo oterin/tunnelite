@@ -1,25 +1,12 @@
 from ast import Return
 import anyio
-import ssl
 from .connection_manager import ConnectionManager
 
-# standard http/s ports
-HTTP_PORT = 80
-HTTPS_PORT = 443
-LOCAL_TEST_PORT = 8080
+# the port the internal http proxy will listen on.
+# in production, an external load balancer will forward public port 80/443 traffic to this port.
+PROXY_PORT = 8080
 
-def get_ssl_context():
-    """creates an ssl context that loads the server's certificate."""
-    try:
-        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        # you must replace these with the actual paths to your wildcard cert and key
-        context.load_cert_chain(certfile="ssl/cert.pem", keyfile="ssl/key.pem")
-        return context
-    except FileNotFoundError:
-        print("warn:     ssl certificates not found. https proxy will not be started.")
-        return None
-
-async def http_proxy_handler(client_stream: anyio.abc.SocketStream, manager: ConnectionManager):
+async def http_proxy_handler(client_stream: anyio.abc.SocketStream, manager: ConnectionManager, is_secure: bool = False):
     """handles a single public http request from start to finish."""
     hostname = ""
     try:
@@ -43,13 +30,21 @@ async def http_proxy_handler(client_stream: anyio.abc.SocketStream, manager: Con
             await client_stream.send(b"http/1.1 404 not found\r\n\r\ntunnel not found.")
             return
 
-        # 3. forward the request to the correct client via the connection manager
+        # 3. add x-forwarded-proto header if the connection is secure
+        if is_secure:
+            # this is a simplified way to inject a header. a real implementation
+            # would parse the http request more robustly.
+            request_lines = request_data.split(b'\r\n')
+            request_lines.insert(1, b'x-forwarded-proto: https')
+            request_data = b'\r\n'.join(request_lines)
+
+        # 4. forward the request to the correct client via the connection manager
         await manager.forward_to_client(manager.tunnels_by_hostname[hostname].tunnel_id, request_data)
 
         # 4. wait for the response to come back from the client
-        response_data = await manager.get_response_from_client(hostname)
+        response_data = await manager.get_http_response_from_client(hostname)
 
-        # 5. write the client's response back to the original requester
+        # 6. write the client's response back to the original requester
         await client_stream.send(response_data)
 
     except Exception as e:
@@ -74,10 +69,16 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, manager: Conn
 
             # task 2: read from websocket -> forward to public client
             async def ws_to_public():
-                # this reads from the response queue where the client puts incoming data
+                # get the connection object to access its dedicated response queue
+                connection = manager.get_connection_by_id(tunnel_id)
+                if not connection:
+                    tg.cancel_scope.cancel()
+                    return
+
                 while True:
-                    response_data = await manager.get_response_from_client(tunnel_id, is_tcp=True)
-                    if not response_data:
+                    # wait for the client to send data back up for this tunnel
+                    response_data = await connection.response_queue.get()
+                    if response_data is None: # use none as a signal to close
                         break
                     await client_stream.send(response_data)
                 tg.cancel_scope.cancel()
@@ -104,32 +105,9 @@ async def start_tcp_listener(manager: ConnectionManager, tunnel_id: str, port: i
         print(f"error:    could not start tcp listener on port {port}: {e}")
 
 
-async def run_proxy_servers(manager: ConnectionManager):
-    """starts all proxy servers concurrently."""
-    ssl_context = get_ssl_context()
+async def run_http_proxy_server(manager: ConnectionManager):
+    """starts the main http proxy server on a single internal port."""
+    listener = await anyio.create_tcp_listener(local_port=PROXY_PORT)
+    print(f"info:     http proxy server listening on 127.0.0.1:{PROXY_PORT}")
     handler = lambda client: http_proxy_handler(client, manager)
-
-    async with anyio.create_task_group() as tg:
-        # start local test http proxy on 8080
-        listener_local = await anyio.create_tcp_listener(local_port=LOCAL_TEST_PORT)
-        tg.start_soon(listener_local.serve, handler)
-        print(f"info:     local http proxy server listening on 127.0.0.1:{LOCAL_TEST_PORT}")
-
-        # start public http proxy on port 80
-        try:
-            listener_http = await anyio.create_tcp_listener(local_port=HTTP_PORT)
-            tg.start_soon(listener_http.serve, handler)
-            print(f"info:     public http proxy server listening on 0.0.0.0:{HTTP_PORT}")
-        except PermissionError:
-            print(f"warn:     permission denied to bind to port {HTTP_PORT}. run with sudo or as root.")
-
-        # start public https proxy on port 443 if ssl context is available
-        if ssl_context:
-            try:
-                listener_https = await anyio.create_tcp_listener(local_port=HTTPS_PORT, tls=True, tls_standard_compatible=False)
-                tg.start_soon(listener_https.serve, handler, ssl_context)
-                print(f"info:     public https proxy server listening on 0.0.0.0:{HTTPS_PORT}")
-            except PermissionError:
-                print(f"warn:     permission denied to bind to port {HTTPS_PORT}. run with sudo or as root.")
-            except Exception as e:
-                print(f"error:    could not start https proxy: {e}")
+    await listener.serve(handler)

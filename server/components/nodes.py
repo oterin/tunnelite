@@ -1,5 +1,5 @@
 import time
-from typing import List
+from typing import List, Optional
 import requests
 from fastapi import APIRouter, Request, BackgroundTasks
 from pydantic import BaseModel, Field

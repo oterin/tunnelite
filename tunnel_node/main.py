@@ -264,12 +264,12 @@ async def websocket_endpoint(websocket: WebSocket):
             # this loop keeps the client connection alive and is where
             # data forwarding from client -> public happens.
             data = await websocket.receive_bytes()
-            # if it's an http tunnel, forward the response to the proxy via the queue
+            # if it's an http tunnel, forward the response to the http proxy's response queue.
             if tunnel_type in ["http", "https"]:
                 await manager.forward_to_proxy(tunnel_id, data)
-            # if it's a tcp tunnel, this data needs to be sent to a specific tcp client.
-            # this requires a more complex bidirectional proxy setup in the handler.
-            # for now, we assume client -> public data is not yet implemented for tcp.
+            # if it's a tcp tunnel, forward it to the tcp proxy's response queue.
+            elif tunnel_type in ["tcp", "udp"]:
+                await manager.forward_to_proxy(tunnel_id, data)
 
     except WebSocketDisconnect:
         if connection:

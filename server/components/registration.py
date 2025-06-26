@@ -11,8 +11,13 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from server.components import database
 from server.logger import log
+import os
 
 router = APIRouter(tags=["node registration"])
+
+ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
+if not ADMIN_API_KEY:
+    raise ValueError("TUNNELITE_ADMIN_KEY environment variable not set")
 
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -35,9 +40,14 @@ async def register_node_websocket(websocket: WebSocket):
     node_secret_id = None
 
     try:
-        # 1. initial handshake
+        # 1. initial handshake and admin authentication
         data = await websocket.receive_json()
         node_secret_id = data.get("node_secret_id")
+        admin_key = data.get("admin_key")
+
+        if admin_key != ADMIN_API_KEY:
+            raise WebSocketDisconnect(code=1008, reason="invalid admin key.")
+
         if not node_secret_id:
             raise WebSocketDisconnect(code=1008, reason="node_secret_id is required.")
 

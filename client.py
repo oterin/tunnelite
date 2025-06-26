@@ -2,7 +2,6 @@ import asyncio
 import getpass
 import json
 import os
-import ssl
 from typing import Optional
 
 import requests
@@ -16,7 +15,7 @@ config_dir = os.path.join(home_dir, ".tunnelite")
 api_key_file = os.path.join(config_dir, "api_key")
 
 # you can override this with an environment variable for different environments.
-main_server_url = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
+main_server_url = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net:8220")
 
 # create the main cli application object.
 app = typer.Typer(
@@ -132,17 +131,10 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
     connect_uri = f"{node_ws_url}/ws/connect"
 
     # 3. connect to the node and run the tunnel
-    ssl_context = ssl.create_default_context()
-    # in a real production scenario with a custom ca, you would load it here:
-    # ssl_context.load_verify_locations(cafile="path/to/ca.pem")
-    # for local testing with self-signed certs, we can disable hostname verification.
-    # do not do this in production with real certificates.
-    if "localhost" in connect_uri or "127.0.0.1" in connect_uri:
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-
+    # the client will now always attempt a secure wss:// connection.
+    # the external load balancer is responsible for handling tls termination.
     try:
-        async with websockets.connect(connect_uri, ssl=ssl_context) as websocket:
+        async with websockets.connect(connect_uri) as websocket:
             # a. perform activation handshake
             await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
 

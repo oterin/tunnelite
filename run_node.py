@@ -1,14 +1,15 @@
 import asyncio
 import uvicorn
 from tunnel_node.main import app as fastapi_app
-from tunnel_node.proxy_server import run_proxy_servers
+from tunnel_node.proxy_server import run_http_proxy_server
 from tunnel_node.connection_manager import manager
 from tunnel_node.config import NODE_PUBLIC_ADDRESS
 
 async def main():
     """
     this is the main entrypoint for running a tunnelite node.
-    it starts both the fastapi control plane server and the data plane proxy servers,
+
+    it starts both the fastapi control plane server and the data plane proxy server,
     allowing them to run concurrently in the same process and share state via the
     connection manager.
     """
@@ -35,7 +36,7 @@ async def main():
     # they will share the same 'manager' instance, allowing them to communicate.
     await asyncio.gather(
         server.serve(),
-        run_proxy_servers(manager)
+        run_http_proxy_server(manager)
     )
 
 if __name__ == "__main__":
