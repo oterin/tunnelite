@@ -1,113 +1,122 @@
-from ast import Return
 import anyio
-from .connection_manager import ConnectionManager
+from fastapi import APIRouter, Request, Response, HTTPException, status
+from .connection_manager import manager
 
-# the port the internal http proxy will listen on.
-# in production, an external load balancer will forward public port 80/443 traffic to this port.
-PROXY_PORT = 8080
+# a new router for the proxy logic.
+# it has no prefix, so its routes are at the root of the app.
+proxy_router = APIRouter()
 
-async def http_proxy_handler(client_stream: anyio.abc.SocketStream, manager: ConnectionManager, is_secure: bool = False):
-    """handles a single public http request from start to finish."""
-    hostname = ""
+# --- http/s reverse proxy logic ---
+
+@proxy_router.api_route("/{full_path:path}", include_in_schema=False, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def http_proxy_catch_all(request: Request, full_path: str):
+    """
+    this catch-all route acts as the http/s reverse proxy.
+    it intercepts any request that doesn't match a defined api route (e.g., /internal/health).
+    """
+    # 1. get the hostname from the host header.
+    host_header = request.headers.get("host")
+    if not host_header:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="host header is missing."
+        )
+
+    # 2. security check: ensure this node is authoritative for the hostname.
+    connection = manager.get_connection_by_hostname(host_header)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"tunnel for {host_header} not found or not active on this node."
+        )
+
+    # 3. reconstruct the raw http request to forward to the client.
+    # start with the request line (e.g., get /path http/1.1)
+    request_line = f"{request.method} /{full_path or ''} HTTP/{request.scope['http_version']}"
+
+    # format headers, including the original host header.
+    headers = [f"{name.decode('utf-8')}: {value.decode('utf-8')}" for name, value in request.headers.raw]
+
+    # combine into a raw request string
+    raw_headers = "\r\n".join([request_line] + headers)
+
+    # encode headers and add the body
+    raw_request = f"{raw_headers}\r\n\r\n".encode('utf-8')
+    raw_request += await request.body()
+
+    # 4. forward the reconstructed request to the correct client.
+    await manager.forward_to_client(connection.tunnel_id, raw_request)
+
+    # 5. wait for the response to come back from the client's dedicated queue.
+    raw_response = await manager.get_http_response_from_client(host_header)
+
+    # 6. parse the raw response from the client and return it.
     try:
-        # 1. read the incoming request and parse the host header
-        request_data = await client_stream.receive(4096)
-        if not request_data:
-            return
+        # separate headers from the body
+        header_bytes, body_bytes = raw_response.split(b'\r\n\r\n', 1)
+        header_lines = header_bytes.decode('utf-8').split('\r\n')
 
-        headers = request_data.decode('utf-8', errors='ignore').split('\r\n')
-        for header in headers:
-            if header.lower().startswith('host:'):
-                hostname = header.split(':', 1)[1].strip()
-                break
+        # parse the status line
+        status_line = header_lines.pop(0)
+        status_code = int(status_line.split(' ')[1])
 
-        if not hostname:
-            await client_stream.send(b"http/1.1 400 bad request\r\n\r\nhost header is missing.")
-            return
+        # parse headers into a dictionary
+        response_headers = {
+            name.strip(): value.strip()
+            for name, value in (line.split(':', 1) for line in header_lines)
+        }
 
-        # 2. security check: ensure this node is authoritative for the hostname
-        if hostname not in manager.tunnels_by_hostname:
-            await client_stream.send(b"http/1.1 404 not found\r\n\r\ntunnel not found.")
-            return
+        # these headers are managed by the server, so we remove them
+        # to avoid conflicts with what fastapi/uvicorn will add.
+        response_headers.pop("content-length", None)
+        response_headers.pop("transfer-encoding", None)
+        response_headers.pop("connection", None)
 
-        # 3. add x-forwarded-proto header if the connection is secure
-        if is_secure:
-            # this is a simplified way to inject a header. a real implementation
-            # would parse the http request more robustly.
-            request_lines = request_data.split(b'\r\n')
-            request_lines.insert(1, b'x-forwarded-proto: https')
-            request_data = b'\r\n'.join(request_lines)
-
-        # 4. forward the request to the correct client via the connection manager
-        await manager.forward_to_client(manager.tunnels_by_hostname[hostname].tunnel_id, request_data)
-
-        # 4. wait for the response to come back from the client
-        response_data = await manager.get_http_response_from_client(hostname)
-
-        # 6. write the client's response back to the original requester
-        await client_stream.send(response_data)
-
+        return Response(content=body_bytes, status_code=status_code, headers=response_headers)
     except Exception as e:
-        print(f"error:    proxy handler failed for {hostname}: {e}")
-    finally:
-        await client_stream.aclose()
+        print(f"error: could not parse client response: {e}")
+        return Response(content=b"bad gateway", status_code=502)
 
+# --- tcp/udp proxy logic (still needed for non-http tunnels) ---
 
-async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, manager: ConnectionManager, tunnel_id: str):
+async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: str):
     """handles a single public tcp connection and proxies data in both directions."""
     print(f"info:     new tcp connection for tunnel {tunnel_id}")
     try:
         async with anyio.create_task_group() as tg:
-            # task 1: read from public client -> forward to websocket
             async def public_to_ws():
                 while True:
                     data = await client_stream.receive(4096)
-                    if not data:
-                        break
+                    if not data: break
                     await manager.forward_to_client(tunnel_id, data)
                 tg.cancel_scope.cancel()
 
-            # task 2: read from websocket -> forward to public client
             async def ws_to_public():
-                # get the connection object to access its dedicated response queue
                 connection = manager.get_connection_by_id(tunnel_id)
                 if not connection:
                     tg.cancel_scope.cancel()
                     return
 
                 while True:
-                    # wait for the client to send data back up for this tunnel
                     response_data = await connection.response_queue.get()
-                    if response_data is None: # use none as a signal to close
-                        break
+                    if response_data is None: break
                     await client_stream.send(response_data)
                 tg.cancel_scope.cancel()
 
             tg.start_soon(public_to_ws)
             tg.start_soon(ws_to_public)
-
     except Exception as e:
         print(f"error:    tcp proxy handler for {tunnel_id} failed: {e}")
     finally:
         print(f"info:     closing tcp connection for tunnel {tunnel_id}")
         await client_stream.aclose()
 
-
-async def start_tcp_listener(manager: ConnectionManager, tunnel_id: str, port: int):
+async def start_tcp_listener(tunnel_id: str, port: int):
     """starts a dedicated tcp listener for a single tunnel on a specific port."""
     try:
         listener = await anyio.create_tcp_listener(local_port=port)
         print(f"info:     tcp listener started for tunnel {tunnel_id} on port {port}")
-        handler = lambda client: tcp_proxy_handler(client, manager, tunnel_id)
+        handler = lambda client: tcp_proxy_handler(client, tunnel_id)
         await listener.serve(handler)
     except Exception as e:
-        # this can happen if the port is already in use, which is a critical failure.
         print(f"error:    could not start tcp listener on port {port}: {e}")
-
-
-async def run_http_proxy_server(manager: ConnectionManager):
-    """starts the main http proxy server on a single internal port."""
-    listener = await anyio.create_tcp_listener(local_port=PROXY_PORT)
-    print(f"info:     http proxy server listening on 127.0.0.1:{PROXY_PORT}")
-    handler = lambda client: http_proxy_handler(client, manager)
-    await listener.serve(handler)

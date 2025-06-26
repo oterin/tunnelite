@@ -14,7 +14,7 @@ import websockets
 
 from . import config
 from .connection_manager import manager
-from .proxy_server import start_tcp_listener
+from .proxy_server import start_tcp_listener, proxy_router
 
 SECRET_ID_FILE = "node_secret_id.txt"
 NODE_SECRET_ID = None
@@ -32,6 +32,9 @@ app = FastAPI(
     title=f"tunnelite node",
     version="0.1.0"
 )
+
+# include the new proxy router. this must be last.
+app.include_router(proxy_router)
 
 node_status = "pending"
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024
@@ -253,7 +256,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 port = int(public_url.split(":")[1])
                 # start the listener as a background task
-                tcp_task = asyncio.create_task(start_tcp_listener(manager, tunnel_id, port))
+                tcp_task = asyncio.create_task(start_tcp_listener(tunnel_id, port))
                 # store the task so we can cancel it later if the client disconnects
                 connection.tcp_server_task = tcp_task
             except (ValueError, IndexError):
