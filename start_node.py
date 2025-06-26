@@ -175,7 +175,6 @@ def start_worker_process(https_socket: socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
-    # these must be imported *after* forking to prevent event loop conflicts.
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
@@ -197,7 +196,6 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
-        # always bind to localhost for the temporary server for security
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
         from tunnel_node.main import app as temp_app
