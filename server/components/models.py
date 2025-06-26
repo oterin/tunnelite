@@ -1,6 +1,7 @@
 from os import sep
 import time
 from pydantic import BaseModel, Field
+from typing import Optional
 from requests.models import stream_decode_response_unicode
 
 class UserCreate(BaseModel):
