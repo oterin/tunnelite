@@ -23,10 +23,9 @@ HTTPS_PORT = 443
 CERT_FILE = "ssl/cert.pem"
 KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
+BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
-# main server url is configured via environment variable.
-# it defaults to the standard, public-facing https port (443).
-# your reverse proxy (caddy) is responsible for routing this to the internal port (e.g., 8220).
+# main server url is configured via environment variable
 MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
@@ -46,6 +45,39 @@ def get_node_secret_id():
         print(f"info:     generated new node secret id: {secret_id}")
         return secret_id
 
+def run_reverse_benchmark():
+    """
+    performs a speed test by connecting *out* to the main server.
+    this avoids firewall issues on the node.
+    """
+    print("info:     performing reverse benchmark...")
+    try:
+        # download test
+        down_url = f"{MAIN_SERVER_URL}/registration/benchmark/download"
+        start_time = time.monotonic()
+        with requests.get(down_url, stream=True, timeout=20, verify=True) as r:
+            r.raise_for_status()
+            for _ in r.iter_content(chunk_size=8192):
+                pass # just consume the data to measure time
+        down_duration = time.monotonic() - start_time
+        down_mbps = (BENCHMARK_PAYLOAD_SIZE / down_duration) * 8 / (1024*1024)
+        print(f"info:     download speed: {down_mbps:.2f} mbps")
+
+        # upload test
+        up_url = f"{MAIN_SERVER_URL}/registration/benchmark/upload"
+        dummy_payload = b'\0' * BENCHMARK_PAYLOAD_SIZE
+        start_time = time.monotonic()
+        r = requests.post(up_url, data=dummy_payload, timeout=20, verify=True)
+        r.raise_for_status()
+        up_duration = time.monotonic() - start_time
+        up_mbps = (BENCHMARK_PAYLOAD_SIZE / up_duration) * 8 / (1024*1024)
+        print(f"info:     upload speed: {up_mbps:.2f} mbps")
+
+        return {"down_mbps": down_mbps, "up_mbps": up_mbps}
+    except requests.RequestException as e:
+        print(f"error:    benchmark failed: {e}")
+        return None
+
 async def run_interactive_registration(node_secret_id: str):
     """the main interactive registration coroutine."""
     if not ADMIN_API_KEY:
@@ -59,19 +91,16 @@ async def run_interactive_registration(node_secret_id: str):
         requests.post(
             f"{MAIN_SERVER_URL}/nodes/register",
             json={"node_secret_id": node_secret_id, "public_address": NODE_PUBLIC_ADDRESS},
-            timeout=10,
-            verify=True # always verify ssl in production
+            timeout=10, verify=True
         )
     except requests.RequestException as e:
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
-    # construct the secure websocket uri
     ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
 
     try:
-        # always use ssl=True for wss:// connections
         async with websockets.connect(ws_uri, ssl=True) as websocket:
             print(f"authenticating with node secret id: {node_secret_id}")
             await websocket.send(json.dumps({
@@ -83,33 +112,27 @@ async def run_interactive_registration(node_secret_id: str):
                 message_str = await websocket.recv()
                 try:
                     message = json.loads(message_str)
-                    if not isinstance(message, dict):
-                        print(f"warn:     received non-dict message from server: {message_str}")
-                        continue
-                except json.JSONDecodeError:
-                    print(f"warn:     received malformed json from server: {message_str}")
-                    continue
+                    if not isinstance(message, dict): continue
+                except json.JSONDecodeError: continue
 
                 msg_type = message.get("type")
 
-                if msg_type == "prompt":
+                if msg_type == "reverse_benchmark":
+                    benchmark_results = run_reverse_benchmark()
+                    if not benchmark_results: return False
+                    await websocket.send(json.dumps(benchmark_results))
+                elif msg_type == "prompt":
                     response = input(f"[server] {message.get('message', '...')} > ")
                     await websocket.send(json.dumps({"response": response}))
-                elif msg_type == "benchmark":
-                    print(f"[server] {message.get('message', 'performing benchmark...')}")
-                    await websocket.send(json.dumps({"type": "ready_for_benchmark"}))
                 elif msg_type == "challenge":
                     print(f"[server] {message.get('message', 'responding to challenge...')}")
                     port, key = message.get('port'), message.get('key')
-                    if not port or not key:
-                        print("error:    received invalid challenge from server.")
-                        return False
+                    if not port or not key: return False
                     try:
                         node_api_url = NODE_PUBLIC_ADDRESS.replace("https", "http")
                         requests.post(
                             f"{node_api_url}/internal/setup-challenge-listener",
-                            json={"port": port, "key": key},
-                            timeout=3
+                            json={"port": port, "key": key}, timeout=3
                         )
                         print(f"[client] instructed node to listen on port {port}.")
                         await websocket.send(json.dumps({"type": "ready_for_challenge"}))
@@ -124,8 +147,6 @@ async def run_interactive_registration(node_secret_id: str):
                 elif msg_type == "failure":
                     print(f"\n[server] failed: {message.get('message', 'registration failed.')}")
                     return False
-                else:
-                    print(f"warn:     received unknown message type '{msg_type}' from server.")
     except Exception as e:
         print(f"an unexpected error occurred during registration: {e}")
         return False
@@ -151,7 +172,6 @@ def start_worker_process(https_socket: socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
-    # these must be imported *after* forking to prevent event loop conflicts.
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
@@ -173,10 +193,8 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
-        # always bind to localhost for the temporary server for security
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
-        # we don't need the full startup logic for the temp server
         from tunnel_node.main import app as temp_app
         uvicorn.run(temp_app, host=host, port=port, log_level="warning")
     except Exception as e:
@@ -198,7 +216,7 @@ if __name__ == "__main__":
             f"{MAIN_SERVER_URL}/nodes/me",
             headers={"x-node-secret-id": node_secret_id},
             timeout=10,
-            verify=True # always verify ssl
+            verify=True
         )
         if res.status_code == 200:
             if res.json().get("status") == "approved":
@@ -214,10 +232,11 @@ if __name__ == "__main__":
         sys.exit(f"error: could not contact main server at {MAIN_SERVER_URL}. ({e})")
 
     if not is_registered_and_approved:
+        # the temporary server is still needed for the port challenges
         temp_server_process = Process(target=run_temp_api_server)
         temp_server_process.start()
         print(f"info:     temporary api server started with pid: {temp_server_process.pid}")
-        time.sleep(3) # give the server a moment to start up
+        time.sleep(3)
 
         registration_success = asyncio.run(run_interactive_registration(node_secret_id))
 

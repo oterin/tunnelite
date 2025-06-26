@@ -7,7 +7,9 @@ from typing import List
 from random_word import RandomWords
 
 import requests
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Response, Header
+from starlette.responses import StreamingResponse
+
 
 from server.components import database
 from server.logger import log
@@ -32,9 +34,28 @@ def parse_port_range(range_str: str) -> List[int]:
             ports.update(range(int(start), int(end) + 1))
         else:
             ports.add(int(part))
-    return sorted(list(ports))
+            return sorted(list(ports))
 
-@router.websocket("/ws/register-node")
+
+        # --- reverse benchmark endpoints ---
+
+        @router.get("/benchmark/download")
+        async def benchmark_download():
+            """returns a large payload for the node to download to test its speed."""
+            async def dummy_generator():
+                for _ in range(BENCHMARK_PAYLOAD_SIZE // 1024):
+                    yield b'\0' * 1024
+            return StreamingResponse(dummy_generator(), media_type="application/octet-stream")
+
+        @router.post("/benchmark/upload")
+        async def benchmark_upload(content_length: int = Header(...)):
+            """receives a large payload from the node to test its upload speed."""
+            # we don't need to actually read the body, just know it was sent.
+            # the content-length header is sufficient.
+            return Response(status_code=200, content=f"received {content_length} bytes.")
+
+
+        @router.websocket("/ws/register-node")
 async def register_node_websocket(websocket: WebSocket):
     await websocket.accept()
     node_secret_id = None
@@ -55,29 +76,19 @@ async def register_node_websocket(websocket: WebSocket):
         if not node_record or not node_record.get("public_address"):
             raise WebSocketDisconnect(code=1008, reason=f"node has not registered its public_address yet. ensure the node is running and has sent a heartbeat.")
 
-        node_api_url = node_record["public_address"]
         node_ip = websocket.client.host # type: ignore
         database.upsert_node({"node_secret_id": node_secret_id, "status": "benchmarking", "verified_ip_address": node_ip})
 
-        # 2. bandwidth benchmark
-        await websocket.send_json({"type": "benchmark", "payload_size": BENCHMARK_PAYLOAD_SIZE})
-        await websocket.receive_json() # wait for client to confirm readiness
+        # 2. reverse bandwidth benchmark
+        # tell the client to start the benchmark. it will connect to our http endpoints.
+        await websocket.send_json({"type": "reverse_benchmark"})
 
-        benchmark_url = f"{node_api_url}/internal/run-benchmark"
+        # wait for the client to send back its measured results
+        benchmark_results = await websocket.receive_json()
+        down_mbps = benchmark_results.get("down_mbps", 0)
+        up_mbps = benchmark_results.get("up_mbps", 0)
 
-        # test download speed (from node's perspective)
-        start_time = time.time()
-        res_down = requests.post(benchmark_url, data=bytes(BENCHMARK_PAYLOAD_SIZE), timeout=15)
-        down_duration = time.time() - start_time
-        down_mbps = (BENCHMARK_PAYLOAD_SIZE / down_duration) / (1024 * 1024) * 8
-
-        # test upload speed (from node's perspective)
-        start_time = time.time()
-        res_up = requests.get(benchmark_url, timeout=15)
-        up_duration = time.time() - start_time
-        up_mbps = (len(res_up.content) / up_duration) / (1024 * 1024) * 8
-
-        await websocket.send_json({"type": "info", "message": f"benchmark complete: {down_mbps:.2f} mbps down / {up_mbps:.2f} mbps up."})
+        await websocket.send_json({"type": "info", "message": f"benchmark results received: {down_mbps:.2f} mbps down / {up_mbps:.2f} mbps up."})
 
         # 3. Interactive Configuration
         recommendation = int(down_mbps / 2) # assuming 2mbps
