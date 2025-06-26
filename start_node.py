@@ -25,7 +25,8 @@ KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
 
 # main server url is configured via environment variable.
-# it defaults to the standard, public-facing https port.
+# it defaults to the standard, public-facing https port (443).
+# your reverse proxy (caddy) is responsible for routing this to the internal port (e.g., 8220).
 MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
@@ -70,6 +71,7 @@ async def run_interactive_registration(node_secret_id: str):
     print(f"connecting to {ws_uri}...")
 
     try:
+        # always use ssl=True for wss:// connections
         async with websockets.connect(ws_uri, ssl=True) as websocket:
             print(f"authenticating with node secret id: {node_secret_id}")
             await websocket.send(json.dumps({
@@ -79,7 +81,6 @@ async def run_interactive_registration(node_secret_id: str):
 
             while True:
                 message_str = await websocket.recv()
-
                 try:
                     message = json.loads(message_str)
                     if not isinstance(message, dict):
@@ -172,7 +173,7 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
-        # always bind to localhost for the temporary server
+        # always bind to localhost for the temporary server for security
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
         # we don't need the full startup logic for the temp server
@@ -199,9 +200,12 @@ if __name__ == "__main__":
             timeout=10,
             verify=True # always verify ssl
         )
-        if res.status_code == 200 and res.json().get("status") == "approved":
-            is_registered_and_approved = True
-            print("info:     node is already registered and approved.")
+        if res.status_code == 200:
+            if res.json().get("status") == "approved":
+                is_registered_and_approved = True
+                print("info:     node is already registered and approved.")
+            else:
+                print(f"info:     node is registered but has status '{res.json().get('status')}'. starting registration...")
         elif res.status_code == 404:
             print("info:     node is not yet registered.")
         else:
