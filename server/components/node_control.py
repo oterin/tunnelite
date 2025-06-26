@@ -43,7 +43,7 @@ class NodeConnectionManager:
 node_manager = NodeConnectionManager()
 
 # create the router for this component
-router = APIRouter(prefix="/tunnelite", tags=["node control"])
+router = APIRouter(tags=["node control"])
 
 
 @router.websocket("/ws/node-control")

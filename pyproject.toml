@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tunnelite-cli"
+version = "0.1.0"
+description = "The command-line client for the tunnelite localhost tunneling service."
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests",
+    "typer[all]",
+    "websockets",
+]
+
+# this section tells pip how to create the 'tunnelite' command
+[project.scripts]
+tunnelite = "client:app"

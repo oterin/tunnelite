@@ -146,7 +146,7 @@ def generate_unique_node_hostname(country_code: str) -> str:
     r = RandomWords()
     for _ in range(20):
         word = r.get_random_word()
-        hostname = f"{word}.{country_code}"
+        hostname = f"{word}.{country_code}.tunnelite.ws"
         # there's no shot there's a node with this fragment
         # but if we put an infinite amount of monkeys in an
         # infinitely large room with ininite typewriters
@@ -156,4 +156,4 @@ def generate_unique_node_hostname(country_code: str) -> str:
             return hostname
 
     # let's fallback to a random string
-    return f"{secrets.token_hex(6)}.{country_code}"
+    return f"{secrets.token_hex(6)}.{country_code}.tunnelite.ws"

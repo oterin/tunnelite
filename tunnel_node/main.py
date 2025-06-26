@@ -14,6 +14,7 @@ import websockets
 
 from . import config
 from .connection_manager import manager
+from .proxy_server import start_tcp_listener
 
 SECRET_ID_FILE = "node_secret_id.txt"
 NODE_SECRET_ID = None
@@ -44,19 +45,25 @@ async def heartbeat_task():
         cpu_percent = psutil.cpu_percent()
         memory_info = psutil.virtual_memory()
 
+        # get tunnel-specific metrics from the connection manager
+        tunnel_metrics = manager.get_and_reset_metrics()
+
         node_details = {
             "node_secret_id": NODE_SECRET_ID,
             "public_address": config.NODE_PUBLIC_ADDRESS,
             "metrics": {
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory_info.percent,
+                "system": {
+                    "cpu_percent": cpu_percent,
+                    "memory_percent": memory_info.percent,
+                },
+                "tunnels": tunnel_metrics,
             },
         }
 
         try:
             print(f"info:     ({time.ctime()}) sending heartbeat...")
             response = requests.post(
-                f"{config.MAIN_SERVER_URL}/tunnelite/nodes/register",
+                f"{config.MAIN_SERVER_URL}/nodes/register",
                 json=node_details
             )
             response.raise_for_status()
@@ -73,7 +80,7 @@ async def heartbeat_task():
 
 async def node_control_channel_task():
     ws_url = config.MAIN_SERVER_URL.replace("http", "ws", 1)
-    control_uri = f"{ws_url}/tunnelite/ws/node-control"
+    control_uri = f"{ws_url}/ws/node-control"
 
     while True:
         try:
@@ -124,7 +131,7 @@ def register_with_main_server():
     print(f"info:     registering with main server at {config.MAIN_SERVER_URL}...")
     try:
         response = requests.post(
-            f"{config.MAIN_SERVER_URL}/tunnelite/nodes/register",
+            f"{config.MAIN_SERVER_URL}/nodes/register",
             json=node_details
         )
         response.raise_for_status()
@@ -218,7 +225,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "node_secret_id": NODE_SECRET_ID
         }
         response = requests.post(
-            f"{config.MAIN_SERVER_URL}/tunnelite/internal/verify-activation",
+            f"{config.MAIN_SERVER_URL}/internal/verify-activation",
             json=activation_payload
         )
 
@@ -236,15 +243,33 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=1011, reason="server returned invalid activation response")
             return
 
-        public_hostname = public_url.split("//")[1].split(":")[0]
+        public_hostname = public_url.split("://")[1].split(":")[0]
+        tunnel_type = official_tunnel_data.get("tunnel_type")
 
         connection = await manager.connect(tunnel_id, public_hostname, websocket)
 
+        # for tcp tunnels, we need to start a dedicated listener on the assigned port
+        if tunnel_type in ["tcp", "udp"]:
+            try:
+                port = int(public_url.split(":")[1])
+                # start the listener as a background task
+                tcp_task = asyncio.create_task(start_tcp_listener(manager, tunnel_id, port))
+                # store the task so we can cancel it later if the client disconnects
+                connection.tcp_server_task = tcp_task
+            except (ValueError, IndexError):
+                await websocket.close(code=1011, reason="invalid public url format for tcp tunnel")
+                return
+
         while True:
             # this loop keeps the client connection alive and is where
-            # data forwarding will happen in the future.
+            # data forwarding from client -> public happens.
             data = await websocket.receive_bytes()
-            # todo: forward data from client to public requester
+            # if it's an http tunnel, forward the response to the proxy via the queue
+            if tunnel_type in ["http", "https"]:
+                await manager.forward_to_proxy(tunnel_id, data)
+            # if it's a tcp tunnel, this data needs to be sent to a specific tcp client.
+            # this requires a more complex bidirectional proxy setup in the handler.
+            # for now, we assume client -> public data is not yet implemented for tcp.
 
     except WebSocketDisconnect:
         if connection:
@@ -252,7 +277,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 deactivation_payload = {"node_secret_id": NODE_SECRET_ID}
                 requests.post(
-                    f"{config.MAIN_SERVER_URL}/tunnelite/internal/tunnels/{connection.tunnel_id}/deactivate",
+                    f"{config.MAIN_SERVER_URL}/internal/tunnels/{connection.tunnel_id}/deactivate",
                     json=deactivation_payload,
                     timeout=3
                 )

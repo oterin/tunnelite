@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from server.components import database
 
-router = APIRouter(prefix="/tunnelite/nodes", tags=["Nodes"])
+router = APIRouter(prefix="/nodes", tags=["nodes"])
 
 class NodeInfo(BaseModel):
     node_secret_id: str

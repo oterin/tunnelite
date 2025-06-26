@@ -24,7 +24,7 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # router setup
-router = APIRouter(prefix="/tunnelite/auth", tags=["Authentication"])
+router = APIRouter(prefix="/auth", tags=["authentication"])
 
 # helper functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:

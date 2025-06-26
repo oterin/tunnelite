@@ -15,7 +15,7 @@ from server.components.models import *
 from server.components.auth import get_current_user
 from server.components.node_control import node_manager
 
-router = APIRouter(prefix="/tunnelite/tunnels", tags=["Tunnels"])
+router = APIRouter(prefix="/tunnels", tags=["tunnels"])
 
 def get_country_code_from_ip(ip: str) -> str:
     if ip == "127.0.0.1": return "local"

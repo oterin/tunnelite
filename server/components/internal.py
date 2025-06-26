@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from server.components import database
 from server.components.models import Tunnel, ActivationRequest, DeactivationRequest
 
-router = APIRouter(prefix="/tunnelite/internal", tags=["Internal"])
+router = APIRouter(prefix="/internal", tags=["internal"])
 
 @router.post("/verify-activation", response_model=Tunnel)
 async def verify_tunnel_activation(req: ActivationRequest):

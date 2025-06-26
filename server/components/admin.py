@@ -37,7 +37,7 @@ async def get_admin_api_key(
     )
 
 router = APIRouter(
-    prefix="/tunnelite/admin",
+    prefix="/admin",
     tags=["admin"],
     dependencies=[Depends(get_admin_api_key)]
 )
