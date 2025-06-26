@@ -2,6 +2,7 @@ import asyncio
 import getpass
 import json
 import os
+import ssl
 from typing import Optional
 
 import requests
@@ -60,13 +61,13 @@ async def handle_http_request(local_port: int, request_data: bytes) -> bytes:
 
 async def handle_tcp_stream(local_port: int, websocket: websockets.WebSocketClientProtocol):
     """handles a bidirectional tcp stream."""
+    local_writer = None
     try:
         local_reader, local_writer = await asyncio.open_connection("127.0.0.1", local_port)
 
         async def forward_to_local_task():
             """forwards data from websocket -> local tcp socket."""
-            while True:
-                data = await websocket.recv()
+            async for data in websocket:
                 if isinstance(data, bytes):
                     local_writer.write(data)
                     await local_writer.drain()
@@ -76,9 +77,12 @@ async def handle_tcp_stream(local_port: int, websocket: websockets.WebSocketClie
             while True:
                 data = await local_reader.read(4096)
                 if not data:
-                    break
+                    break # local connection closed
                 await websocket.send(data)
 
+        # run both forwarding tasks concurrently and cancel them if one finishes.
+        # for example, if the local connection is closed, forward_to_ws_task will
+        # break, and this gather will cancel forward_to_local_task.
         await asyncio.gather(forward_to_local_task(), forward_to_ws_task())
 
     except ConnectionRefusedError:
@@ -128,8 +132,17 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
     connect_uri = f"{node_ws_url}/ws/connect"
 
     # 3. connect to the node and run the tunnel
+    ssl_context = ssl.create_default_context()
+    # in a real production scenario with a custom ca, you would load it here:
+    # ssl_context.load_verify_locations(cafile="path/to/ca.pem")
+    # for local testing with self-signed certs, we can disable hostname verification.
+    # do not do this in production with real certificates.
+    if "localhost" in connect_uri or "127.0.0.1" in connect_uri:
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
     try:
-        async with websockets.connect(connect_uri) as websocket:
+        async with websockets.connect(connect_uri, ssl=ssl_context) as websocket:
             # a. perform activation handshake
             await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
 
