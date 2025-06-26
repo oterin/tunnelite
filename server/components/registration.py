@@ -55,7 +55,7 @@ def parse_port_range(range_str: str) -> List[int]:
             return Response(status_code=200, content=f"received {content_length} bytes.")
 
 
-        @router.websocket("/ws/register-node")
+@router.websocket("/ws/register-node")
 async def register_node_websocket(websocket: WebSocket):
     await websocket.accept()
     node_secret_id = None
