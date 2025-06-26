@@ -15,7 +15,7 @@ from server.components import database
 from server.logger import log
 import os
 
-router = APIRouter(tags=["node registration"])
+router = APIRouter(prefix="/registration", tags=["node registration"])
 
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
@@ -37,22 +37,22 @@ def parse_port_range(range_str: str) -> List[int]:
             return sorted(list(ports))
 
 
-        # --- reverse benchmark endpoints ---
+# --- reverse benchmark endpoints ---
 
-        @router.get("/benchmark/download")
-        async def benchmark_download():
-            """returns a large payload for the node to download to test its speed."""
-            async def dummy_generator():
-                for _ in range(BENCHMARK_PAYLOAD_SIZE // 1024):
-                    yield b'\0' * 1024
-            return StreamingResponse(dummy_generator(), media_type="application/octet-stream")
+@router.get("/benchmark/download")
+async def benchmark_download():
+    """returns a large payload for the node to download to test its speed."""
+    async def dummy_generator():
+        for _ in range(BENCHMARK_PAYLOAD_SIZE // 1024):
+            yield b'\0' * 1024
+    return StreamingResponse(dummy_generator(), media_type="application/octet-stream")
 
-        @router.post("/benchmark/upload")
-        async def benchmark_upload(content_length: int = Header(...)):
-            """receives a large payload from the node to test its upload speed."""
-            # we don't need to actually read the body, just know it was sent.
-            # the content-length header is sufficient.
-            return Response(status_code=200, content=f"received {content_length} bytes.")
+@router.post("/benchmark/upload")
+async def benchmark_upload(content_length: int = Header(...)):
+    """receives a large payload from the node to test its upload speed."""
+    # we don't need to actually read the body, just know it was sent.
+    # the content-length header is sufficient.
+    return Response(status_code=200, content=f"received {content_length} bytes.")
 
 
 @router.websocket("/ws/register-node")

@@ -23,9 +23,11 @@ HTTPS_PORT = 443
 CERT_FILE = "ssl/cert.pem"
 KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
-BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb
 
-# main server url is configured via environment variable
+# main server url is configured via environment variable.
+# it defaults to the standard, public-facing https port (443).
+# your reverse proxy (caddy) is responsible for routing this to the internal application port.
 MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
@@ -96,6 +98,7 @@ async def run_interactive_registration(node_secret_id: str):
     except requests.RequestException as e:
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
+    # construct the secure websocket uri
     ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
@@ -172,6 +175,7 @@ def start_worker_process(https_socket: socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
+    # these must be imported *after* forking to prevent event loop conflicts.
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
@@ -193,6 +197,7 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
+        # always bind to localhost for the temporary server for security
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
         from tunnel_node.main import app as temp_app
@@ -232,7 +237,6 @@ if __name__ == "__main__":
         sys.exit(f"error: could not contact main server at {MAIN_SERVER_URL}. ({e})")
 
     if not is_registered_and_approved:
-        # the temporary server is still needed for the port challenges
         temp_server_process = Process(target=run_temp_api_server)
         temp_server_process.start()
         print(f"info:     temporary api server started with pid: {temp_server_process.pid}")
@@ -248,7 +252,6 @@ if __name__ == "__main__":
             sys.exit("error: node registration failed. please check logs and try again.")
         print("info:     registration successful! proceeding to production startup.")
 
-    # --- start the full production server ---
     if os.geteuid() != 0:
         sys.exit("error: must run as root to start production server and bind privileged ports.")
 
