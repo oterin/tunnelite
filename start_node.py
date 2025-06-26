@@ -79,21 +79,31 @@ async def run_interactive_registration(node_secret_id: str):
 
             while True:
                 message_str = await websocket.recv()
-                message = json.loads(message_str)
+
+                try:
+                    message = json.loads(message_str)
+                    if not isinstance(message, dict):
+                        print(f"warn:     received non-dict message from server: {message_str}")
+                        continue
+                except json.JSONDecodeError:
+                    print(f"warn:     received malformed json from server: {message_str}")
+                    continue
+
                 msg_type = message.get("type")
 
                 if msg_type == "prompt":
-                    response = input(f"[server] {message['message']} > ")
+                    response = input(f"[server] {message.get('message', '...')} > ")
                     await websocket.send(json.dumps({"response": response}))
                 elif msg_type == "benchmark":
-                    print(f"[server] {message['message']}")
-                    # acknowledge that we are ready for the benchmark to start
+                    print(f"[server] {message.get('message', 'performing benchmark...')}")
                     await websocket.send(json.dumps({"type": "ready_for_benchmark"}))
                 elif msg_type == "challenge":
-                    print(f"[server] {message['message']}")
-                    port, key = message['port'], message['key']
+                    print(f"[server] {message.get('message', 'responding to challenge...')}")
+                    port, key = message.get('port'), message.get('key')
+                    if not port or not key:
+                        print("error:    received invalid challenge from server.")
+                        return False
                     try:
-                        # the node's internal api is always http, not https
                         node_api_url = NODE_PUBLIC_ADDRESS.replace("https", "http")
                         requests.post(
                             f"{node_api_url}/internal/setup-challenge-listener",
@@ -106,13 +116,15 @@ async def run_interactive_registration(node_secret_id: str):
                         print(f"[client] error: could not contact local api for challenge: {e}")
                         return False
                 elif msg_type == "info":
-                    print(f"[server] {message['message']}")
+                    print(f"[server] {message.get('message', '...')}")
                 elif msg_type == "success":
-                    print(f"\n[server] success: {message['message']}")
+                    print(f"\n[server] success: {message.get('message', 'registration complete!')}")
                     return True
                 elif msg_type == "failure":
-                    print(f"\n[server] failed: {message['message']}")
+                    print(f"\n[server] failed: {message.get('message', 'registration failed.')}")
                     return False
+                else:
+                    print(f"warn:     received unknown message type '{msg_type}' from server.")
     except Exception as e:
         print(f"an unexpected error occurred during registration: {e}")
         return False
@@ -160,10 +172,12 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
-        # fix: always bind to localhost for the temporary server
+        # always bind to localhost for the temporary server
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
-        uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
+        # we don't need the full startup logic for the temp server
+        from tunnel_node.main import app as temp_app
+        uvicorn.run(temp_app, host=host, port=port, log_level="warning")
     except Exception as e:
         print(f"error: failed to start temporary server: {e}")
 
