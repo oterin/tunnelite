@@ -25,7 +25,8 @@ from server import garbage_collector, dependencies
 # prepare global dependencies
 global_dependencies = []
 if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
-    global_dependencies.append(Depends(dependencies.enforce_https))
+    # for global app dependencies, you pass the function directly.
+    global_dependencies.append(dependencies.enforce_https)
 
 app = FastAPI(
     title="tunnelite backend",
@@ -52,6 +53,7 @@ async def startup_event():
     # run every 10 minutes
     asyncio.create_task(garbage_collector.run_periodically(interval=600))
 
-@app.get("/tunnelite/users/me")
-async def me(user: auth.User = Depends(auth.get_current_user)):
-    return user
+# this route was moved to the auth component.
+# @app.get("/users/me")
+# async def me(user: auth.User = Depends(auth.get_current_user)):
+#     return user

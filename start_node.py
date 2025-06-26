@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import ssl
 import sys
 import pwd
 import grp
@@ -25,8 +24,10 @@ CERT_FILE = "ssl/cert.pem"
 KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
 
-# main server url is configured via environment variable
-MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net:443")
+# main server url is configured via environment variable.
+# important: this now defaults to the standard https port 443.
+# the :8220 port is an internal detail for your reverse proxy (caddy).
+MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
 
@@ -134,6 +135,7 @@ def start_worker_process(https_socket: socket):
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
+    # attach startup events for this worker process
     fastapi_app.add_event_handler("startup", fastapi_startup)
 
     config = uvicorn.Config(
@@ -152,8 +154,9 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
-        host, port_str = NODE_PUBLIC_ADDRESS.split("//")[1].split(":")
-        port = int(port_str)
+        # fix: always bind to localhost for the temporary server
+        host = "127.0.0.1"
+        port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
         uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
     except Exception as e:
         print(f"error: failed to start temporary server: {e}")
@@ -183,7 +186,7 @@ if __name__ == "__main__":
         else:
             print(f"warn:     received unexpected status from server: {res.status_code} {res.text}")
     except requests.RequestException as e:
-        sys.exit(f"error: could not contact main server at {MAIN_SERVER_URL}. {e}")
+        sys.exit(f"error: could not contact main server at {MAIN_SERVER_URL}. ({e})")
 
     if not is_registered_and_approved:
         temp_server_process = Process(target=run_temp_api_server)
@@ -199,7 +202,7 @@ if __name__ == "__main__":
 
         if not registration_success:
             sys.exit("error: node registration failed. please check logs and try again.")
-        print("info:     registration successful!")
+        print("info:     registration successful! proceeding to production startup.")
 
     # --- start the full production server ---
     if os.geteuid() != 0:
