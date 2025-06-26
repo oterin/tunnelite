@@ -15,8 +15,7 @@ from server.components import database
 from server.components.models import *
 from pydantic import BaseModel, Field
 
-from dotenv import load_dotenv
-load_dotenv()
+
 
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:

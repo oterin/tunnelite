@@ -13,6 +13,7 @@ from server.components.registration import parse_port_range
 from server.components import database
 from server.components.models import *
 from server.components.auth import get_current_user
+from server.components.node_control import node_manager
 
 router = APIRouter(prefix="/tunnelite/tunnels", tags=["Tunnels"])
 
@@ -174,6 +175,7 @@ async def create_tunnel(
         "status": "pending",
         "created_at": time.time(),
         "node_secret_id": best_node["node_secret_id"], # internal link to the node
+        "node_public_hostname": best_node["public_hostname"] # --- ADD THIS LINE ---
     }
     database.save_tunnel(new_tunnel_data)
 
@@ -203,7 +205,8 @@ async def list_user_tunnels(current_user: dict = Depends(get_current_user)):
     for tunnel in user_tunnels_data:
         response_tunnel = tunnel.copy()
         node_secret_id = response_tunnel.pop("node_secret_id", None)
-        response_tunnel["public_hostname"] = nodes_map.get(node_secret_id, "unknown-node")
+        # Use the stored node_public_hostname if available, otherwise fall back to lookup
+        response_tunnel["public_hostname"] = response_tunnel.get("node_public_hostname", nodes_map.get(node_secret_id, "unknown-node"))
         response_tunnels.append(response_tunnel)
 
     return response_tunnels
@@ -227,5 +230,14 @@ async def delete_tunnel(
         )
 
     database.update_tunnel_status(tunnel_id, "deleted_by_user")
-# in a future step, we would also notify the node to tear down the tunnel in real-time
+
+    # notify the node to tear down the tunnel in real-time
+    teardown_message = {
+        "type": "teardown_tunnel",
+        "tunnel_id": tunnel_id,
+    }
+    await node_manager.send_message_to_node(
+        tunnel.get("node_secret_id"), teardown_message
+    )
+
     return

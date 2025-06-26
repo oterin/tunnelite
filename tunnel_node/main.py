@@ -1,28 +1,31 @@
+import asyncio
 import time
 import requests
 import json
 import uuid
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request as FastAPIRequest, Response
 from pydantic import BaseModel
+from requests.models import requote_uri
 import uvicorn
-import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import psutil
+import websockets
 
 from . import config
+from .connection_manager import manager
 
-secret_id_file = "node_secret_id.txt"
-node_secret_id = None
+SECRET_ID_FILE = "node_secret_id.txt"
+NODE_SECRET_ID = None
 try:
-    with open(secret_id_file, "r") as f:
-        node_secret_id = f.read().strip()
-    print(f"loaded existing node secret id: {node_secret_id}")
+    with open(SECRET_ID_FILE, "r") as f:
+        NODE_SECRET_ID = f.read().strip()
+    print(f"info:     loaded existing node secret id: {NODE_SECRET_ID}")
 except FileNotFoundError:
-    node_secret_id = str(uuid.uuid4())
-    with open(secret_id_file, "w") as f:
-        f.write(node_secret_id)
-    print(f"generated new node secret id: {node_secret_id}")
+    NODE_SECRET_ID = str(uuid.uuid4())
+    with open(SECRET_ID_FILE, "w") as f:
+        f.write(NODE_SECRET_ID)
+    print(f"info:     generated new node secret id: {NODE_SECRET_ID}")
 
 app = FastAPI(
     title=f"tunnelite node",
@@ -30,18 +33,19 @@ app = FastAPI(
 )
 
 node_status = "pending"
+BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024
 
 async def heartbeat_task():
     while True:
         await asyncio.sleep(60)
 
         global node_status
-        # Get system metrics using psutil
+        # get system metrics using psutil
         cpu_percent = psutil.cpu_percent()
         memory_info = psutil.virtual_memory()
 
         node_details = {
-            "node_secret_id": node_secret_id,
+            "node_secret_id": NODE_SECRET_ID,
             "public_address": config.NODE_PUBLIC_ADDRESS,
             "metrics": {
                 "cpu_percent": cpu_percent,
@@ -50,9 +54,9 @@ async def heartbeat_task():
         }
 
         try:
-            print(f"({time.ctime()}) sending heartbeat...")
+            print(f"info:     ({time.ctime()}) sending heartbeat...")
             response = requests.post(
-                f"{config.MAIN_SERVER_URL}/nodes/register",
+                f"{config.MAIN_SERVER_URL}/tunnelite/nodes/register",
                 json=node_details
             )
             response.raise_for_status()
@@ -61,38 +65,76 @@ async def heartbeat_task():
             new_status = response_data.get("status", "pending")
 
             if new_status != node_status:
-                print(f"status changed from '{node_status}' to '{new_status}'.")
+                print(f"info:     status changed from '{node_status}' to '{new_status}'.")
                 node_status = new_status
 
         except requests.RequestException as e:
-            print(f"heartbeat failed: {e}")
+            print(f"error:    heartbeat failed: {e}")
+
+async def node_control_channel_task():
+    ws_url = config.MAIN_SERVER_URL.replace("http", "ws", 1)
+    control_uri = f"{ws_url}/tunnelite/ws/node-control"
+
+    while True:
+        try:
+            print(f"info:     connecting to server control channel at {control_uri}...")
+            async with websockets.connect(control_uri) as websocket:
+                # 1. authenticate with the server
+                auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
+                await websocket.send(json.dumps(auth_payload))
+                print("info:     node control channel connected and authenticated.")
+
+                # 2. listen for commands from the server
+                async for message in websocket:
+                    try:
+                        command = json.loads(message)
+                        if command.get("type") == "teardown_tunnel":
+                            tunnel_id = command.get("tunnel_id")
+                            print(f"info:     received teardown command for tunnel {tunnel_id}")
+                            await manager.close_tunnel(tunnel_id)
+                    except json.JSONDecodeError:
+                        print("error:    received malformed command from server.")
+                    except Exception as e:
+                        print(f"error:    error processing command from server: {e}")
+
+        except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError) as e:
+            print(f"warn:     control channel connection lost: {e}. reconnecting in 20 seconds.")
+            await asyncio.sleep(20)
+        except Exception as e:
+            print(f"error:    an unexpected error occurred in the control channel task: {e}. reconnecting in 60 seconds.")
+            await asyncio.sleep(60)
+
 
 @app.on_event("startup")
 def on_startup():
+    # perform initial registration immediately
     register_with_main_server()
-    print("starting heartbeat background task...")
+
+    # start background tasks
+    print("info:     starting background tasks (heartbeat, control channel)...")
     asyncio.create_task(heartbeat_task())
+    asyncio.create_task(node_control_channel_task())
 
 def register_with_main_server():
     global node_status
     node_details = {
-        "node_secret_id": node_secret_id,
+        "node_secret_id": NODE_SECRET_ID,
         "public_address": config.NODE_PUBLIC_ADDRESS,
     }
-    print(f"registering with main server at {config.MAIN_SERVER_URL}...")
+    print(f"info:     registering with main server at {config.MAIN_SERVER_URL}...")
     try:
         response = requests.post(
-            f"{config.MAIN_SERVER_URL}/nodes/register",
+            f"{config.MAIN_SERVER_URL}/tunnelite/nodes/register",
             json=node_details
         )
         response.raise_for_status()
 
         response_data = response.json()
         node_status = response_data.get("status", "pending")
-        print(f"initial registration successful. current status: {node_status}")
+        print(f"info:     initial registration successful. current status: {node_status}")
 
     except requests.RequestException as e:
-        print(f"error: could not register with main server. {e}")
+        print(f"error:    could not register with main server. {e}")
 
 @app.get("/health")
 async def health_check():
@@ -100,7 +142,7 @@ async def health_check():
 
 @app.get("/ping")
 async def ping():
-    return {"ack": "pong", "node_secret_id": node_secret_id}
+    return {"ack": "pong", "node_secret_id": NODE_SECRET_ID}
 
 benchmark_payload_size = 10 * 1024 * 1024  # 10 mb
 
@@ -123,7 +165,7 @@ def run_challenge_server(port, key):
     handler.challenge_key = key
     server = HTTPServer(('', port), handler)
     server.handle_request()
-    print(f"challenge listener on port {port} finished")
+    print(f"info:     challenge listener on port {port} finished")
 
 @app.post("/internal/setup-challenge-listener")
 async def setup_challenge_listener(req: ChallengeRequest):
@@ -140,25 +182,86 @@ async def benchmark_post(request: FastAPIRequest):
 async def benchmark_get():
     return Response(content=bytes(benchmark_payload_size))
 
+class TeardownRequest(BaseModel):
+    tunnel_id: str
+
+@app.post("/internal/teardown-tunnel")
+async def teardown_tunnel(req: TeardownRequest):
+    print(f"info:     received teardown request for tunnel {req.tunnel_id}")
+    closed = await manager.close_tunnel(req.tunnel_id)
+    if closed:
+        return {"status": "ok", "message": "tunnel connection closed."}
+    else:
+        return {"status": "ok", "message": "tunnel not found or already disconnected."}
+
+
 @app.websocket("/ws/connect")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
+    connection = None
 
-    tunnel_id_for_this_connection = None
     try:
         # 1. activation handshake
         message_str = await websocket.receive_text()
         message = json.loads(message_str)
 
         if message.get("type") != "activate":
-            await websocket.send_json({
-                    "error": "first message must be an activation request"
-                })
-            raise WebSocketDisconnect()
+            await websocket.close(code=1008, reason="first message must be an activation request")
+            return
 
-        tunnel_id_for_this_connection = message.get("tunnel_id")
+        tunnel_id = message.get("tunnel_id")
+        api_key = message.get("api_key")
+
+        # 2. verify with main server
         activation_payload = {
-            "tunnel_id": tunnel_id_for_this_connection,
-            "api_key": message.get("api_key"),
-            "node_secret_id": node_secret_id
+            "tunnel_id": tunnel_id,
+            "api_key": api_key,
+            "node_secret_id": NODE_SECRET_ID
         }
+        response = requests.post(
+            f"{config.MAIN_SERVER_URL}/tunnelite/internal/verify-activation",
+            json=activation_payload
+        )
+
+        if not response.ok:
+            error_detail = response.json().get("detail", "activation failed")
+            await websocket.close(code=1008, reason=error_detail)
+            return
+
+        # 3. activation successful. use the authoritative data from the server
+        official_tunnel_data = response.json()
+        public_url = official_tunnel_data.get("public_url")
+        tunnel_id = official_tunnel_data.get("tunnel_id")
+
+        if not public_url or not tunnel_id:
+            await websocket.close(code=1011, reason="server returned invalid activation response")
+            return
+
+        public_hostname = public_url.split("//")[1].split(":")[0]
+
+        connection = await manager.connect(tunnel_id, public_hostname, websocket)
+
+        while True:
+            # this loop keeps the client connection alive and is where
+            # data forwarding will happen in the future.
+            data = await websocket.receive_bytes()
+            # todo: forward data from client to public requester
+
+    except WebSocketDisconnect:
+        if connection:
+            manager.disconnect(connection.tunnel_id)
+            try:
+                deactivation_payload = {"node_secret_id": NODE_SECRET_ID}
+                requests.post(
+                    f"{config.MAIN_SERVER_URL}/tunnelite/internal/tunnels/{connection.tunnel_id}/deactivate",
+                    json=deactivation_payload,
+                    timeout=3
+                )
+            except requests.RequestException as e:
+                print(f"error:    failed to report deactivation for {connection.tunnel_id}: {e}")
+        else:
+            print("info:     client disconnected before activating a tunnel.")
+    except Exception as e:
+        print(f"error:    an unexpected error occurred in websocket: {e}")
+        if connection and not connection.websocket.client_state.DISCONNECTED:
+            await connection.websocket.close(code=1011)
+            manager.disconnect(connection.tunnel_id)
