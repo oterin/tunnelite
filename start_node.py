@@ -85,6 +85,10 @@ async def run_interactive_registration(node_secret_id: str):
                 if msg_type == "prompt":
                     response = input(f"[server] {message['message']} > ")
                     await websocket.send(json.dumps({"response": response}))
+                elif msg_type == "benchmark":
+                    print(f"[server] {message['message']}")
+                    # acknowledge that we are ready for the benchmark to start
+                    await websocket.send(json.dumps({"type": "ready_for_benchmark"}))
                 elif msg_type == "challenge":
                     print(f"[server] {message['message']}")
                     port, key = message['port'], message['key']
