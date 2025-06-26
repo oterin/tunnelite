@@ -1,23 +1,27 @@
-from fastapi import Request, HTTPException, status
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.types import ASGIApp
+from fastapi import HTTPException, status
 
-async def enforce_https(request: Request):
+class HTTPSRedirectMiddleware(BaseHTTPMiddleware):
     """
-    a fastapi dependency that enforces https connections in a production environment.
+    a middleware to enforce https connections in a production environment.
 
-    this function checks for the 'x-forwarded-proto' header, which is a standard
-    header added by reverse proxies (like nginx, heroku, aws alb) to indicate the
-    protocol of the original request.
-
-    if the `enforce_https` flag is set and the protocol is not 'https', it rejects
-    the request, ensuring that the application only accepts secure traffic.
+    it inspects the 'x-forwarded-proto' header from a reverse proxy.
+    if the protocol is not 'https', it rejects the request.
     """
-    # this check is based on the 'x-forwarded-proto' header.
-    # in a real deployment, a reverse proxy would handle tls termination
-    # and set this header to 'https' for encrypted requests.
-    if request.headers.get("x-forwarded-proto") != "https":
-        # we also check the direct scheme for local development without a proxy
-        if request.url.scheme != "https":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="insecure connections are not allowed. please use https.",
-            )
+    def __init__(self, app: ASGIApp):
+        super().__init__(app)
+
+    async def dispatch(self, request: Request, call_next):
+        if request.headers.get("x-forwarded-proto") != "https":
+            # also check the direct scheme for local development or direct connections
+            if request.url.scheme != "https":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="insecure connections are not allowed. please use https.",
+                )
+
+        response = await call_next(request)
+        return response

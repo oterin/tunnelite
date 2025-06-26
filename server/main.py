@@ -21,21 +21,20 @@ from server.components import (
     node_control,
 )
 from server import garbage_collector, dependencies
-
-# prepare global dependencies
-global_dependencies = []
-if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
-        # for global app dependencies, you must wrap the function in depends().
-        global_dependencies.append(Depends(dependencies.enforce_https))
+from server.dependencies import HTTPSRedirectMiddleware
 
 app = FastAPI(
     title="tunnelite backend",
     description="we tunnelin data in here",
     version="0.1.0",
-    dependencies=global_dependencies,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# this middleware will enforce https on all routes if enabled
+if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
+    app.add_middleware(HTTPSRedirectMiddleware)
+
 app.add_middleware(SlowAPIMiddleware)
 
 app.include_router(auth.router)

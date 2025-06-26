@@ -25,8 +25,7 @@ KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
 
 # main server url is configured via environment variable.
-# important: this now defaults to the standard https port 443.
-# the :8220 port is an internal detail for your reverse proxy (caddy).
+# it defaults to the standard, public-facing https port.
 MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
@@ -59,17 +58,19 @@ async def run_interactive_registration(node_secret_id: str):
         requests.post(
             f"{MAIN_SERVER_URL}/nodes/register",
             json={"node_secret_id": node_secret_id, "public_address": NODE_PUBLIC_ADDRESS},
-            timeout=10
+            timeout=10,
+            verify=True # always verify ssl in production
         )
     except requests.RequestException as e:
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
+    # construct the secure websocket uri
     ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
 
     try:
-        async with websockets.connect(ws_uri) as websocket:
+        async with websockets.connect(ws_uri, ssl=True) as websocket:
             print(f"authenticating with node secret id: {node_secret_id}")
             await websocket.send(json.dumps({
                 "node_secret_id": node_secret_id,
@@ -88,8 +89,10 @@ async def run_interactive_registration(node_secret_id: str):
                     print(f"[server] {message['message']}")
                     port, key = message['port'], message['key']
                     try:
+                        # the node's internal api is always http, not https
+                        node_api_url = NODE_PUBLIC_ADDRESS.replace("https", "http")
                         requests.post(
-                            f"{NODE_PUBLIC_ADDRESS}/internal/setup-challenge-listener",
+                            f"{node_api_url}/internal/setup-challenge-listener",
                             json={"port": port, "key": key},
                             timeout=3
                         )
@@ -135,7 +138,6 @@ def start_worker_process(https_socket: socket):
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
-    # attach startup events for this worker process
     fastapi_app.add_event_handler("startup", fastapi_startup)
 
     config = uvicorn.Config(
@@ -176,7 +178,8 @@ if __name__ == "__main__":
         res = requests.get(
             f"{MAIN_SERVER_URL}/nodes/me",
             headers={"x-node-secret-id": node_secret_id},
-            timeout=10
+            timeout=10,
+            verify=True # always verify ssl
         )
         if res.status_code == 200 and res.json().get("status") == "approved":
             is_registered_and_approved = True
