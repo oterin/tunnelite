@@ -1,10 +1,11 @@
 import time
 from typing import List, Optional
 import requests
-from fastapi import APIRouter, Request, BackgroundTasks
+from fastapi import APIRouter, Request, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from server.components import database
+from server.components.models import Node
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -18,6 +19,17 @@ class NodeInfoPublic(BaseModel):
     public_hostname: str
     location: str
     public_address: str
+
+@router.get("/me", response_model=Node)
+async def get_node_me(x_node_secret_id: str = Header(...)):
+    """allows a node to get its own full registration record."""
+    node = database.get_node_by_secret_id(x_node_secret_id)
+    if not node:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="node not found."
+        )
+    return node
 
 @router.post("/register")
 async def register_node(node_info: NodeInfo, request: Request):
