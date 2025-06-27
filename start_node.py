@@ -170,9 +170,11 @@ async def run_interactive_registration(node_secret_id: str):
                     port, key = message.get('port'), message.get('key')
                     if not port or not key: return False
                     try:
-                        node_api_url = NODE_PUBLIC_ADDRESS.replace("https", "http")
+                        # connect to the local temporary api server, not the public address
+                        local_port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
+                        local_api_url = f"http://127.0.0.1:{local_port}"
                         requests.post(
-                            f"{node_api_url}/internal/setup-challenge-listener",
+                            f"{local_api_url}/internal/setup-challenge-listener",
                             json={"port": port, "key": key}, timeout=3
                         )
                         print(f"[client] instructed node to listen on port {port}.")
