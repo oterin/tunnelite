@@ -34,9 +34,6 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# include the new proxy router. this must be last.
-app.include_router(proxy_router)
-
 node_status = "pending"
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024
 
@@ -369,3 +366,6 @@ def get_node_cert() -> str:
             return f.read().strip()
     except FileNotFoundError:
         return ""
+
+# include the new proxy router. this must be last.
+app.include_router(proxy_router)
