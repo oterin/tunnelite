@@ -24,7 +24,7 @@ class ConnectionManager:
 
     async def connect(self, tunnel_id: str, public_hostname: str, websocket: WebSocket) -> Connection:
         """registers a new, active tunnel connection."""
-        await websocket.accept()
+        # websocket should already be accepted by the calling endpoint
         connection = Connection(websocket, tunnel_id, public_hostname)
         self.tunnels_by_id[tunnel_id] = connection
 
