@@ -246,64 +246,6 @@ async def handle_http_request(local_port: int, request_data: bytes) -> bytes:
         error_response = f"HTTP/1.1 502 Bad Gateway\r\nContent-Length: {len(str(e))}\r\n\r\n{e}".encode()
         return error_response
 
-async def handle_tcp_stream(local_port: int, websocket: websockets.WebSocketClientProtocol):
-    """handle tcp tunnel streaming with proper bidirectional data flow"""
-    try:
-        # establish connection to local tcp service
-        local_reader, local_writer = await asyncio.open_connection('127.0.0.1', local_port)
-        print(f"debug:    connected to local tcp service on port {local_port}")
-        
-        async def forward_to_local_task():
-            """forward data from websocket to local tcp service"""
-            try:
-                async for message in websocket:
-                    if isinstance(message, bytes):
-                        print(f"debug:    forwarding {len(message)} bytes from websocket to local service")
-                        local_writer.write(message)
-                        await local_writer.drain()
-                    else:
-                        print(f"debug:    received non-bytes message from websocket: {type(message)}")
-            except websockets.exceptions.ConnectionClosed:
-                print("debug:    websocket connection closed in forward_to_local_task")
-            except Exception as e:
-                print(f"debug:    error in forward_to_local_task: {e}")
-            finally:
-                if not local_writer.is_closing():
-                    local_writer.close()
-                    try:
-                        await local_writer.wait_closed()
-                    except:
-                        pass
-
-        async def forward_to_ws_task():
-            """forward data from local tcp service to websocket"""
-            try:
-                while True:
-                    data = await local_reader.read(4096)
-                    if not data:
-                        print("debug:    local tcp connection closed")
-                        break
-                    print(f"debug:    forwarding {len(data)} bytes from local service to websocket")
-                    await websocket.send(data)
-            except websockets.exceptions.ConnectionClosed:
-                print("debug:    websocket connection closed in forward_to_ws_task")
-            except Exception as e:
-                print(f"debug:    error in forward_to_ws_task: {e}")
-
-        # run both forwarding tasks concurrently
-        await asyncio.gather(
-            forward_to_local_task(),
-            forward_to_ws_task(),
-            return_exceptions=True
-        )
-        
-    except ConnectionRefusedError:
-        print(f"error:    could not connect to local service on port {local_port}")
-        add_network_event("error", f"local service on port {local_port} refused connection")
-    except Exception as e:
-        print(f"error:    tcp stream error: {e}")
-        add_network_event("error", f"tcp stream error: {e}")
-
 # --- main tunnel coroutine ---
 async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
     """run tunnel with beautiful centered tui"""
@@ -570,7 +512,72 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                 elif tunnel_type in ["tcp", "udp"]:
                     add_network_event("tunnel", f"starting {tunnel_type} tunnel on port {local_port}")
                     print(f"debug:    starting tcp tunnel, forwarding {public_url} -> localhost:{local_port}")
-                    await handle_tcp_stream(local_port, websocket)
+                    
+                    # establish connection to local tcp service
+                    try:
+                        local_reader, local_writer = await asyncio.open_connection('127.0.0.1', local_port)
+                        print(f"debug:    connected to local tcp service on port {local_port}")
+                        add_network_event("connection", f"connected to local service on port {local_port}")
+                    except ConnectionRefusedError:
+                        print(f"error:    could not connect to local service on port {local_port}")
+                        add_network_event("error", f"local service on port {local_port} refused connection")
+                        live.update(make_layout("", "", f"local service on port {local_port} not available"))
+                        await asyncio.sleep(3)
+                        return
+                    
+                    # bidirectional tcp forwarding
+                    async def forward_to_local():
+                        """forward data from websocket to local tcp service"""
+                        try:
+                            while True:
+                                data = await websocket.recv()
+                                if isinstance(data, bytes):
+                                    print(f"debug:    forwarding {len(data)} bytes from websocket to local service")
+                                    add_network_event("request", f"TCP data ({len(data)}b)")
+                                    local_writer.write(data)
+                                    await local_writer.drain()
+                                    
+                                    # update stats
+                                    bytes_in += len(data)
+                                    live.update(make_layout("active", public_url))
+                        except websockets.exceptions.ConnectionClosed:
+                            print("debug:    websocket connection closed in forward_to_local")
+                        except Exception as e:
+                            print(f"debug:    error in forward_to_local: {e}")
+                        finally:
+                            if not local_writer.is_closing():
+                                local_writer.close()
+                                try:
+                                    await local_writer.wait_closed()
+                                except:
+                                    pass
+
+                    async def forward_to_websocket():
+                        """forward data from local tcp service to websocket"""
+                        try:
+                            while True:
+                                data = await local_reader.read(4096)
+                                if not data:
+                                    print("debug:    local tcp connection closed")
+                                    break
+                                print(f"debug:    forwarding {len(data)} bytes from local service to websocket")
+                                add_network_event("response", f"TCP response ({len(data)}b)")
+                                await websocket.send(data)
+                                
+                                # update stats
+                                bytes_out += len(data)
+                                live.update(make_layout("active", public_url))
+                        except websockets.exceptions.ConnectionClosed:
+                            print("debug:    websocket connection closed in forward_to_websocket")
+                        except Exception as e:
+                            print(f"debug:    error in forward_to_websocket: {e}")
+
+                    # run both forwarding tasks concurrently
+                    await asyncio.gather(
+                        forward_to_local(),
+                        forward_to_websocket(),
+                        return_exceptions=True
+                    )
 
         except requests.RequestException as e:
             error_msg = e.response.text if e.response else str(e)
