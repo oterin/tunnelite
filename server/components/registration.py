@@ -65,16 +65,23 @@ async def register_node_websocket(websocket: WebSocket):
     try:
         # 1. initial handshake and admin authentication
         data = await websocket.receive_json()
+        log.info("registration websocket received data", extra={"data": data})
+        
         node_secret_id = data.get("node_secret_id")
         admin_key = data.get("admin_key")
+        
+        log.info("checking admin key", extra={"received_key": admin_key, "expected_key": ADMIN_API_KEY})
 
         if admin_key != ADMIN_API_KEY:
+            log.error("admin key mismatch!", extra={"received": admin_key, "expected": ADMIN_API_KEY})
             raise WebSocketDisconnect(code=1008, reason="invalid admin key.")
 
         if not node_secret_id:
+            log.error("no node_secret_id provided")
             raise WebSocketDisconnect(code=1008, reason="node_secret_id is required.")
 
         node_record = database.get_node_by_secret_id(node_secret_id)
+        log.info("node record lookup", extra={"node_secret_id": node_secret_id, "found": node_record is not None})
         if not node_record:
             log.warning("node record not found during registration", extra={"node_secret_id": node_secret_id})
             raise WebSocketDisconnect(code=1008, reason="node not registered (send heartbeat first)")
