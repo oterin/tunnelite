@@ -8,6 +8,7 @@ import uuid
 import time
 from multiprocessing import Process, cpu_count
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
+from urllib.parse import urlparse, urlunparse
 
 import requests
 import uvicorn
@@ -25,13 +26,24 @@ KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb
 
-# main server url is configured via environment variable.
+# main server url is configured via environment variable
 # it defaults to the standard, public-facing https port (443).
-# your reverse proxy (caddy) or direct uvicorn server is responsible for routing this.
-MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
+RAW_MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
 
+def get_public_url(base_url: str) -> str:
+    """
+    parses a url and ensures it points to the standard public port (443 for https).
+    this prevents errors when an internal port is accidentally included in the env var.
+    """
+    parsed = urlparse(base_url)
+    if parsed.scheme == "https":
+        # rebuild the url without a port, implying the default port 443
+        return urlunparse((parsed.scheme, parsed.hostname, parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return base_url
+
+MAIN_SERVER_URL = get_public_url(RAW_MAIN_SERVER_URL)
 
 # --- phase 1: interactive registration logic ---
 
@@ -60,7 +72,7 @@ def run_reverse_benchmark():
         with requests.get(down_url, stream=True, timeout=20, verify=True) as r:
             r.raise_for_status()
             for _ in r.iter_content(chunk_size=8192):
-                pass # just consume the data to measure time
+                pass
         down_duration = time.monotonic() - start_time
         down_mbps = (BENCHMARK_PAYLOAD_SIZE / down_duration) * 8 / (1024*1024)
         print(f"info:     download speed: {down_mbps:.2f} mbps")
@@ -85,7 +97,6 @@ async def run_interactive_registration(node_secret_id: str):
     if not NODE_PUBLIC_ADDRESS:
         sys.exit("error: NODE_PUBLIC_ADDRESS not found in environment for registration.")
 
-    # before registering, we must send a heartbeat so the server knows our address
     print("info:     sending initial heartbeat...")
     try:
         requests.post(
@@ -96,8 +107,7 @@ async def run_interactive_registration(node_secret_id: str):
     except requests.RequestException as e:
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
-    # construct the secure websocket uri
-    ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
+    ws_uri = MAIN_SERVER_URL.replace("https", "wss") + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
 
@@ -156,7 +166,6 @@ async def run_interactive_registration(node_secret_id: str):
 # --- phase 2: production server logic ---
 
 def drop_privileges(uid_name: str, gid_name: str):
-    """drops root privileges to a specified user and group for security."""
     try:
         new_uid = pwd.getpwnam(uid_name).pw_uid
         new_gid = grp.getgrnam(gid_name).gr_gid
@@ -169,7 +178,6 @@ def drop_privileges(uid_name: str, gid_name: str):
     print(f"info:     (pid: {os.getpid()}) process privileges dropped to {uid_name}:{gid_name}")
 
 def start_worker_process(https_socket: socket):
-    """this is the main entrypoint for each worker process."""
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
@@ -189,9 +197,7 @@ def start_worker_process(https_socket: socket):
     server = uvicorn.Server(config)
     server.run()
 
-
 def run_temp_api_server():
-    """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
         host = "127.0.0.1"
