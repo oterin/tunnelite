@@ -223,65 +223,65 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
     with Live(make_layout("creating"), refresh_per_second=2) as live:
         try:
             # 1. create tunnel
-        create_payload = {"tunnel_type": tunnel_type, "local_port": local_port}
-        res = requests.post(f"{main_server_url}/tunnels", headers=headers, json=create_payload)
-        res.raise_for_status()
-        tunnel = res.json()
-
-    tunnel_id = tunnel["tunnel_id"]
-    public_url = tunnel["public_url"]
-    public_hostname = tunnel["public_hostname"]
-
+            create_payload = {"tunnel_type": tunnel_type, "local_port": local_port}
+            res = requests.post(f"{main_server_url}/tunnels", headers=headers, json=create_payload)
+            res.raise_for_status()
+            tunnel = res.json()
+            
+            tunnel_id = tunnel["tunnel_id"]
+            public_url = tunnel["public_url"]
+            public_hostname = tunnel["public_hostname"]
+            
             # 2. get node details
             live.update(make_layout("connecting", public_url))
-        node_res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
-        node_res.raise_for_status()
-        target_node = next((n for n in node_res.json() if n["public_hostname"] == public_hostname), None)
+            node_res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
+            node_res.raise_for_status()
+            target_node = next((n for n in node_res.json() if n["public_hostname"] == public_hostname), None)
             
-        if not target_node:
+            if not target_node:
                 live.update(make_layout("", "", f"could not find assigned node '{public_hostname}'"))
                 await asyncio.sleep(3)
                 return
-
-    node_ws_url = target_node["public_address"].replace("http", "ws", 1)
-    connect_uri = f"{node_ws_url}/ws/connect"
-
+            
+            node_ws_url = target_node["public_address"].replace("http", "ws", 1)
+            connect_uri = f"{node_ws_url}/ws/connect"
+            
             # 3. connect and run tunnel
-        async with websockets.connect(connect_uri) as websocket:
-            await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
-
-            activation_response_str = await websocket.recv()
-            activation_response = json.loads(activation_response_str)
-            if activation_response.get("status") != "success":
+            async with websockets.connect(connect_uri) as websocket:
+                await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
+                
+                activation_response_str = await websocket.recv()
+                activation_response = json.loads(activation_response_str)
+                if activation_response.get("status") != "success":
                     live.update(make_layout("", "", f"activation failed: {activation_response}"))
                     await asyncio.sleep(3)
-                return
-
+                    return
+                
                 live.update(make_layout("active", public_url))
                 start_time = time.time()
                 
                 # proxy loop with live updates
-            if tunnel_type in ["http", "https"]:
-                while True:
-                    request_from_node = await websocket.recv()
-                    request_data_bytes = request_from_node if isinstance(request_from_node, bytes) else request_from_node.encode('utf-8')
-                    response_to_node = await handle_http_request(local_port, request_data_bytes)
-                    await websocket.send(response_to_node)
+                if tunnel_type in ["http", "https"]:
+                    while True:
+                        request_from_node = await websocket.recv()
+                        request_data_bytes = request_from_node if isinstance(request_from_node, bytes) else request_from_node.encode('utf-8')
+                        response_to_node = await handle_http_request(local_port, request_data_bytes)
+                        await websocket.send(response_to_node)
                         
                         request_count += 1
                         live.update(make_layout("active", public_url))
                         
-            elif tunnel_type in ["tcp", "udp"]:
-                await handle_tcp_stream(local_port, websocket)
-
+                elif tunnel_type in ["tcp", "udp"]:
+                    await handle_tcp_stream(local_port, websocket)
+                    
         except requests.RequestException as e:
             error_msg = e.response.text if e.response else str(e)
             live.update(make_layout("", "", f"api error: {error_msg}"))
             await asyncio.sleep(3)
-    except (ConnectionRefusedError, websockets.exceptions.InvalidURI):
+        except (ConnectionRefusedError, websockets.exceptions.InvalidURI):
             live.update(make_layout("", "", f"could not connect to node at {connect_uri}"))
             await asyncio.sleep(3)
-    except websockets.exceptions.ConnectionClosed as e:
+        except websockets.exceptions.ConnectionClosed as e:
             live.update(make_layout("", "", f"connection closed: {e.reason} (code: {e.code})"))
             await asyncio.sleep(3)
 
@@ -339,18 +339,18 @@ def login_user():
     ) as progress:
         task = progress.add_task("logging in...", total=None)
         
-    try:
-        res = requests.post(
-            f"{main_server_url}/auth/token",
-            data={"username": username, "password": password}
-        )
-        res.raise_for_status()
-        api_key = res.json()["api_key"]
-        save_api_key(api_key)
+        try:
+            res = requests.post(
+                f"{main_server_url}/auth/token",
+                data={"username": username, "password": password}
+            )
+            res.raise_for_status()
+            api_key = res.json()["api_key"]
+            save_api_key(api_key)
             progress.stop_task(task)
             console.print(" login successful!", style="green")
             
-    except requests.RequestException as e:
+        except requests.RequestException as e:
             progress.stop_task(task)
             error_msg = e.response.text if e.response else str(e)
             console.print(f" login failed: {error_msg}", style="red")

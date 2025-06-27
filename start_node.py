@@ -336,9 +336,9 @@ def find_available_port_in_range(port_list):
             continue
     return None
 
-def run_background_service():
+def run_background_service(updated_public_address: str):
     """runs the background service (heartbeat and control channel) in a separate process"""
-    print(f"info:     background service starting (pid: {os.getpid()})")
+    print(f"info:     background service starting (pid: {os.getpid()}) with address {updated_public_address}")
     
     # import the background tasks from tunnel_node
     import asyncio
@@ -354,9 +354,10 @@ def run_background_service():
         while True:
             await asyncio.sleep(60)  # heartbeat every minute
             
+            # use the updated public address that reflects the actual running port
             node_details = {
                 "node_secret_id": node_secret_id,
-                "public_address": NODE_PUBLIC_ADDRESS,
+                "public_address": updated_public_address,  # use the passed parameter
                 "metrics": {
                     "cpu_percent": 0,  # simplified for background service
                     "memory_percent": 0,
@@ -365,7 +366,7 @@ def run_background_service():
             }
             
             try:
-                print(f"info:     ({time.ctime()}) sending heartbeat...")
+                print(f"info:     ({time.ctime()}) sending heartbeat with address {updated_public_address}...")
                 
                 if node_cert:
                     try:
@@ -386,6 +387,7 @@ def run_background_service():
                     )
                     
                 response.raise_for_status()
+                print(f"info:     heartbeat successful, server updated with address {updated_public_address}")
                 
             except requests.RequestException as e:
                 print(f"error:    heartbeat failed: {e}")
@@ -449,6 +451,8 @@ def run_background_service():
 # --- main entrypoint ---
 
 if __name__ == "__main__":
+    global NODE_PUBLIC_ADDRESS # type: ignore
+    
     if sys.platform == "win32":
         sys.exit("error: this script is not supported on windows.")
 
@@ -532,6 +536,59 @@ if __name__ == "__main__":
     if not chosen_port:
         sys.exit(f"error: no available ports in range {available_ports}")
 
+    # update the public address to reflect the actual port we're running on
+    # this ensures heartbeats and client connections use the correct port
+    original_address = NODE_PUBLIC_ADDRESS
+    host_part = NODE_PUBLIC_ADDRESS.split("://")[1].split(":")[0]
+    protocol = NODE_PUBLIC_ADDRESS.split("://")[0]
+    updated_public_address = f"{protocol}://{host_part}:{chosen_port}"
+    
+    print(f"info:     updating public address from {original_address} to {updated_public_address}")
+    
+    # update the global variable so heartbeats use the correct address
+    NODE_PUBLIC_ADDRESS = updated_public_address
+    
+    # send an immediate heartbeat to update the server with the correct address
+    print(f"info:     sending immediate heartbeat to update server with correct address...")
+    try:
+        node_cert = get_node_cert()
+        immediate_heartbeat_data = {
+            "node_secret_id": node_secret_id,
+            "public_address": updated_public_address,
+            "metrics": {
+                "cpu_percent": 0,
+                "memory_percent": 0,
+                "active_connections": 0
+            }
+        }
+        
+        if node_cert:
+            try:
+                response = requests.post(
+                    f"{MAIN_SERVER_URL}/nodes/heartbeat",
+                    json=immediate_heartbeat_data,
+                    headers={"x-node-cert": node_cert},
+                    timeout=10
+                )
+            except requests.RequestException:
+                response = requests.post(
+                    f"{MAIN_SERVER_URL}/nodes/register",
+                    json=immediate_heartbeat_data,
+                    timeout=10
+                )
+        else:
+            response = requests.post(
+                f"{MAIN_SERVER_URL}/nodes/register",
+                json=immediate_heartbeat_data,
+                timeout=10
+            )
+        
+        response.raise_for_status()
+        print(f"info:     immediate heartbeat successful - server now has correct address {updated_public_address}")
+        
+    except requests.RequestException as e:
+        print(f"warn:     immediate heartbeat failed: {e}, background service will retry")
+
     try:
         https_socket = socket(AF_INET, SOCK_STREAM)
         https_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
@@ -542,7 +599,7 @@ if __name__ == "__main__":
         sys.exit(f"error: failed to bind socket on port {chosen_port}: {e}")
 
     # start background service in main process
-    background_service_process = Process(target=run_background_service)
+    background_service_process = Process(target=run_background_service, args=(updated_public_address,))
     background_service_process.start()
     print(f"info:     background service started with pid: {background_service_process.pid}")
 
