@@ -33,6 +33,37 @@ async def verify_tunnel_activation(req: ActivationRequest):
 
     raise HTTPException(status_code=500, detail="failed to update tunnel status")
 
+@router.post("/tunnels/{tunnel_id}/activate")
+async def activate_tunnel(
+    tunnel_id: str,
+    req: DeactivationRequest  # reuse the same model since it just needs node_secret_id
+):
+    """endpoint for nodes to notify that a tunnel is now active and ready"""
+    # 1. verify the tunnel exists
+    tunnel = database.get_tunnel_by_id(tunnel_id)
+    if not tunnel:
+        raise HTTPException(status_code=404, detail="tunnel not found")
+
+    # 2. verify the node is authorized for this tunnel
+    if tunnel.get("node_secret_id") != req.node_secret_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="node is not authorized to activate this tunnel"
+        )
+
+    # 3. update status to active if it's currently pending
+    if tunnel.get("status") == "pending":
+        if database.update_tunnel_status(tunnel_id, "active"):
+            return {"status": "ok", "message": "tunnel activated"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="failed to update tunnel status"
+            )
+    else:
+        # tunnel is already active or in another state, that's fine
+        return {"status": "ok", "message": f"tunnel status is {tunnel.get('status')}"}
+
 @router.post("/tunnels/{tunnel_id}/deactivate")
 async def deactivate_tunnel(
     tunnel_id: str,
