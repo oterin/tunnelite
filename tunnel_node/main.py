@@ -315,16 +315,18 @@ async def teardown_tunnel(req: TeardownRequest):
 @app.websocket("/ws/connect")
 async def websocket_endpoint(websocket: WebSocket):
     connection = None
-
+    print("info:     /ws/connect endpoint entered, awaiting new connection...")
     try:
         # 1. accept the connection first!
         await websocket.accept()
+        print("info:     connection accepted successfully.")
         
         # 2. activation handshake
         message_str = await websocket.receive_text()
         message = json.loads(message_str)
 
         if message.get("type") != "activate":
+            print(f"error:    client sent wrong first message: {message}")
             await websocket.close(code=1008, reason="first message must be an activation request")
             return
 
@@ -332,6 +334,7 @@ async def websocket_endpoint(websocket: WebSocket):
         api_key = message.get("api_key")
 
         # 3. verify with main server
+        print(f"info:     verifying activation for tunnel {tunnel_id} with main server...")
         activation_payload = {
             "tunnel_id": tunnel_id,
             "api_key": api_key,
@@ -344,11 +347,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
         if not response.ok:
             error_detail = response.json().get("detail", "activation failed")
+            print(f"error:    activation failed from main server: {error_detail}")
             await websocket.close(code=1008, reason=error_detail)
             return
 
         # 4. activation successful. use the authoritative data from the server
         official_tunnel_data = response.json()
+        print(f"info:     activation successful: {official_tunnel_data}")
         public_url = official_tunnel_data.get("public_url")
         tunnel_id = official_tunnel_data.get("tunnel_id")
 
@@ -387,7 +392,8 @@ async def websocket_endpoint(websocket: WebSocket):
             elif tunnel_type in ["tcp", "udp"]:
                 await manager.forward_to_proxy(tunnel_id, data)
 
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as e:
+        print(f"info:     websocket disconnected cleanly (code: {e.code}, reason: {e.reason})")
         if connection:
             manager.disconnect(connection.tunnel_id)
             try:
@@ -397,15 +403,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     json=deactivation_payload,
                     timeout=3
                 )
-            except requests.RequestException as e:
-                print(f"error:    failed to report deactivation for {connection.tunnel_id}: {e}")
+            except requests.RequestException as req_e:
+                print(f"error:    failed to report deactivation for {connection.tunnel_id}: {req_e}")
         else:
             print("info:     client disconnected before activating a tunnel.")
     except Exception as e:
-        print(f"error:    an unexpected error occurred in websocket: {e}")
+        print(f"error:    an unexpected error occurred in websocket: {type(e).__name__} - {e}")
         if connection and not connection.websocket.client_state.DISCONNECTED:
             await connection.websocket.close(code=1011)
             manager.disconnect(connection.tunnel_id)
+    finally:
+        print("info:     /ws/connect endpoint exited.")
 
 def get_node_cert() -> str:
     """get node certificate from file"""

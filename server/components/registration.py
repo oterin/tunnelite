@@ -242,19 +242,22 @@ async def register_node_websocket(websocket: WebSocket):
         )
 
 def generate_unique_node_hostname(country_code: str) -> str:
-    r = RandomWords()
-    for _ in range(20):
-        word = r.get_random_word()
-        # combine word and country code for a single-level subdomain
-        hostname_part = f"{word}-{country_code}"
-        hostname = f"{hostname_part}.tunnelite.ws"
-        # there's no shot there's a node with this fragment
-        # but if we put an infinite amount of monkeys in an
-        # infinitely large room with ininite typewriters
-        # eventually it is bound to create all the works of
-        # shakespeare so i'd err on the side of caution 🤷🏻‍♂️
-        if not any(hostname == n.get("public_hostname") for n in database.get_all_nodes()):
-            return hostname
+    """
+    Generates a unique, pretty hostname for a node based on its country.
+    - First node in a country gets: <country_code>.tunnelite.ws
+    - Subsequent nodes get: <country_code>-<n>.tunnelite.ws
+    """
+    all_nodes = database.get_all_nodes()
 
-    # let's fallback to a random string
-    return f"{secrets.token_hex(4)}-{country_code}.tunnelite.ws"
+    # 1. Check if the simple base hostname is available (e.g., "nl.tunnelite.ws")
+    base_hostname = f"{country_code}.tunnelite.ws"
+    if not any(n.get("public_hostname") == base_hostname for n in all_nodes):
+        return base_hostname
+
+    # 2. If base is taken, find the next available numeric suffix (e.g., "nl-2.tunnelite.ws")
+    i = 2
+    while True:
+        next_hostname = f"{country_code}-{i}.tunnelite.ws"
+        if not any(n.get("public_hostname") == next_hostname for n in all_nodes):
+            return next_hostname
+        i += 1
