@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import ssl
 import sys
 import pwd
 import grp
@@ -28,7 +27,7 @@ BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb
 
 # main server url is configured via environment variable.
 # it defaults to the standard, public-facing https port (443).
-# your reverse proxy (caddy) is responsible for routing this to the internal application port.
+# your reverse proxy (caddy) or direct uvicorn server is responsible for routing this.
 MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
@@ -83,8 +82,6 @@ def run_reverse_benchmark():
 
 async def run_interactive_registration(node_secret_id: str):
     """the main interactive registration coroutine."""
-    if not ADMIN_API_KEY:
-        sys.exit("error: TUNNELITE_ADMIN_KEY not found in environment for registration.")
     if not NODE_PUBLIC_ADDRESS:
         sys.exit("error: NODE_PUBLIC_ADDRESS not found in environment for registration.")
 
@@ -100,12 +97,11 @@ async def run_interactive_registration(node_secret_id: str):
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
     # construct the secure websocket uri
-    ws_uri = MAIN_SERVER_URL.replace("https", "wss").replace("http", "ws") + "/ws/register-node"
+    ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
 
     try:
-        # always use ssl=True for wss:// connections
         async with websockets.connect(ws_uri, ssl=True) as websocket:
             print(f"authenticating with node secret id: {node_secret_id}")
             await websocket.send(json.dumps({
@@ -117,12 +113,8 @@ async def run_interactive_registration(node_secret_id: str):
                 message_str = await websocket.recv()
                 try:
                     message = json.loads(message_str)
-                    if not isinstance(message, dict):
-                        print(f"warn:     received non-dict message from server: {message_str}")
-                        continue
-                except json.JSONDecodeError:
-                    print(f"warn:     received malformed json from server: {message_str}")
-                    continue
+                    if not isinstance(message, dict): continue
+                except json.JSONDecodeError: continue
 
                 msg_type = message.get("type")
 
@@ -156,8 +148,6 @@ async def run_interactive_registration(node_secret_id: str):
                 elif msg_type == "failure":
                     print(f"\n[server] failed: {message.get('message', 'registration failed.')}")
                     return False
-                else:
-                    print(f"warn:     received unknown message type '{msg_type}' from server.")
     except Exception as e:
         print(f"an unexpected error occurred during registration: {e}")
         return False
@@ -183,7 +173,6 @@ def start_worker_process(https_socket: socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
-    # these must be imported *after* forking to prevent event loop conflicts.
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
@@ -205,7 +194,6 @@ def run_temp_api_server():
     """runs a single, temporary uvicorn instance for registration challenges."""
     print("info:     starting temporary api server for registration...")
     try:
-        # always bind to localhost for the temporary server for security
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
         from tunnel_node.main import app as temp_app
@@ -245,6 +233,9 @@ if __name__ == "__main__":
         sys.exit(f"error: could not contact main server at {MAIN_SERVER_URL}. ({e})")
 
     if not is_registered_and_approved:
+        if not ADMIN_API_KEY:
+            sys.exit("error: TUNNELITE_ADMIN_KEY must be set in environment to register a new node.")
+
         temp_server_process = Process(target=run_temp_api_server)
         temp_server_process.start()
         print(f"info:     temporary api server started with pid: {temp_server_process.pid}")
