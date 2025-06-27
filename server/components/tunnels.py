@@ -48,7 +48,8 @@ def get_available_tcp_port(node: dict) -> Optional[int]:
     for t in active_tunnels:
         if t.get("node_secret_id") == node["node_secret_id"] and t.get("tunnel_type") in ["tcp", "udp"]:
             try:
-                port = int(t["public_url"].split(":")[1])
+                # extract port from url like "tcp://hostname:8202"
+                port = int(t["public_url"].split(":")[-1])  # get the last part after splitting on ":"
                 used_ports.add(port)
             except (IndexError, ValueError):
                 continue
