@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import psutil
 import websockets
 import socket
+import os
 
 from . import config
 from .connection_manager import manager
@@ -36,6 +37,9 @@ app = FastAPI(
 
 node_status = "pending"
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024
+
+# flag to control whether background tasks should start (only in main process)
+ENABLE_BACKGROUND_TASKS = os.environ.get("ENABLE_BACKGROUND_TASKS", "true").lower() == "true"
 
 async def heartbeat_task():
     while True:
@@ -166,11 +170,13 @@ async def on_startup():
 
     # start background tasks
     print("info:     starting background tasks (heartbeat, control channel)...")
-    asyncio.create_task(heartbeat_task())
+    if ENABLE_BACKGROUND_TASKS:
+        asyncio.create_task(heartbeat_task())
     
     # wait a moment before starting control channel to let registration settle
     await asyncio.sleep(5)
-    asyncio.create_task(node_control_channel_task())
+    if ENABLE_BACKGROUND_TASKS:
+        asyncio.create_task(node_control_channel_task())
 
 def register_with_main_server():
     global node_status

@@ -224,6 +224,9 @@ def start_worker_process(https_socket: socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
+    # disable background tasks in worker processes
+    os.environ["ENABLE_BACKGROUND_TASKS"] = "false"
+
     from tunnel_node.main import on_startup as fastapi_startup
     import uvicorn
 
@@ -333,6 +336,116 @@ def find_available_port_in_range(port_list):
             continue
     return None
 
+def run_background_service():
+    """runs the background service (heartbeat and control channel) in a separate process"""
+    print(f"info:     background service starting (pid: {os.getpid()})")
+    
+    # import the background tasks from tunnel_node
+    import asyncio
+    import requests
+    import time
+    import json
+    import websockets
+    
+    async def background_heartbeat():
+        node_secret_id = get_node_secret_id()
+        node_cert = get_node_cert()
+        
+        while True:
+            await asyncio.sleep(60)  # heartbeat every minute
+            
+            node_details = {
+                "node_secret_id": node_secret_id,
+                "public_address": NODE_PUBLIC_ADDRESS,
+                "metrics": {
+                    "cpu_percent": 0,  # simplified for background service
+                    "memory_percent": 0,
+                    "active_connections": 0
+                }
+            }
+            
+            try:
+                print(f"info:     ({time.ctime()}) sending heartbeat...")
+                
+                if node_cert:
+                    try:
+                        response = requests.post(
+                            f"{MAIN_SERVER_URL}/nodes/heartbeat",
+                            json=node_details,
+                            headers={"x-node-cert": node_cert}
+                        )
+                    except requests.RequestException:
+                        response = requests.post(
+                            f"{MAIN_SERVER_URL}/nodes/register",
+                            json=node_details
+                        )
+                else:
+                    response = requests.post(
+                        f"{MAIN_SERVER_URL}/nodes/register",
+                        json=node_details
+                    )
+                    
+                response.raise_for_status()
+                
+            except requests.RequestException as e:
+                print(f"error:    heartbeat failed: {e}")
+
+    async def background_control_channel():
+        retry_count = 0
+        max_retries = 5
+        
+        await asyncio.sleep(10)  # wait for things to settle
+        
+        while True:
+            try:
+                node_cert = get_node_cert()
+                ws_url = MAIN_SERVER_URL.replace("http", "ws", 1)
+                
+                if node_cert:
+                    token_preview = node_cert[:20] + "..." if len(node_cert) > 20 else node_cert
+                    control_uri = f"{ws_url}/ws/node-control-jwt?token={node_cert}"
+                    print(f"info:     connecting to JWT control channel with token {token_preview} (attempt {retry_count + 1})")
+                else:
+                    control_uri = f"{ws_url}/ws/node-control"
+                    print(f"info:     connecting to legacy control channel (attempt {retry_count + 1})")
+                    
+                async with websockets.connect(control_uri, ssl=True) as websocket:
+                    if not node_cert:
+                        auth_payload = {"type": "auth", "node_secret_id": get_node_secret_id()}
+                        await websocket.send(json.dumps(auth_payload))
+                        
+                    print("info:     background control channel connected successfully.")
+                    retry_count = 0
+
+                    async for message in websocket:
+                        try:
+                            command = json.loads(message)
+                            print(f"info:     received command: {command}")
+                        except json.JSONDecodeError:
+                            print("error:    received malformed command from server.")
+                        except Exception as e:
+                            print(f"error:    error processing command: {e}")
+
+            except Exception as e:
+                retry_count += 1
+                if retry_count <= max_retries:
+                    backoff_time = min(10 * retry_count, 60)
+                    print(f"warn:     background control channel failed: {e}. retrying in {backoff_time}s... (attempt {retry_count}/{max_retries})")
+                    await asyncio.sleep(backoff_time)
+                else:
+                    print(f"warn:     background control channel failed after {max_retries} attempts. giving up for 5 minutes.")
+                    await asyncio.sleep(300)
+                    retry_count = 0
+
+    async def main():
+        await asyncio.gather(
+            background_heartbeat(),
+            background_control_channel()
+        )
+    
+    # run the background service
+    asyncio.run(main())
+
 # --- main entrypoint ---
 
 if __name__ == "__main__":
@@ -428,6 +541,11 @@ if __name__ == "__main__":
     except Exception as e:
         sys.exit(f"error: failed to bind socket on port {chosen_port}: {e}")
 
+    # start background service in main process
+    background_service_process = Process(target=run_background_service)
+    background_service_process.start()
+    print(f"info:     background service started with pid: {background_service_process.pid}")
+
     num_workers = cpu_count()
     print(f"info:     spawning {num_workers} worker processes...")
     workers = []
@@ -443,6 +561,8 @@ if __name__ == "__main__":
             worker.join()
     except KeyboardInterrupt:
         print("\ninfo:     shutting down main process...")
+        background_service_process.terminate()
+        background_service_process.join()
         for worker in workers:
             worker.terminate()
             worker.join()
