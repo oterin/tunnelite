@@ -129,8 +129,8 @@ async def run_interactive_registration(node_secret_id: str):
     print(f"connecting to {ws_uri}...")
 
     try:
-        # increase timeout for websocket connection
-        async with websockets.connect(ws_uri, ssl=True, open_timeout=30, close_timeout=10) as websocket:
+        # increase timeout for websocket connection and keepalive
+        async with websockets.connect(ws_uri, ssl=True, open_timeout=30, close_timeout=10, ping_interval=60, ping_timeout=30) as websocket:
             print(f"authenticating with node secret id: {node_secret_id}")
             await websocket.send(json.dumps({
                 "node_secret_id": node_secret_id,
@@ -140,7 +140,7 @@ async def run_interactive_registration(node_secret_id: str):
             while True:
                 try:
                     print("debug:    waiting for message from server...")
-                    message_str = await asyncio.wait_for(websocket.recv(), timeout=30.0)
+                    message_str = await asyncio.wait_for(websocket.recv(), timeout=300.0)  # 5 minutes for interactive prompts
                     print(f"debug:    received message: {message_str}")
                 except asyncio.TimeoutError:
                     print("error:    timeout waiting for server message")
