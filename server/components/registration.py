@@ -23,6 +23,9 @@ ADMIN_API_KEY = config.get("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
     raise ValueError("TUNNELITE_ADMIN_KEY not configured")
 
+# debug flag to skip port verification (useful for testing behind NAT/firewall)
+SKIP_PORT_VERIFICATION = config.get("SKIP_PORT_VERIFICATION", "false").lower() == "true"
+
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
 def parse_port_range(range_str: str) -> List[int]:
@@ -115,62 +118,68 @@ async def register_node_websocket(websocket: WebSocket):
         ports_to_verify = parse_port_range(port_range_str)
 
         # 4. multi-port verification with concurrent challenges
-        await websocket.send_json({"type": "info", "message": f"setting up challenge listeners on {len(ports_to_verify)} ports..."})
-        
-        # first, tell the node to set up all challenge listeners
-        challenge_keys = {}
-        for port in ports_to_verify:
-            challenge_key = secrets.token_hex(8)
-            challenge_keys[port] = challenge_key
-            await websocket.send_json({
-                "type": "challenge",
-                "message": f"setting up listener on port {port}...",
-                "port": port,
-                "key": challenge_key
-            })
-            await websocket.receive_json() # wait for client readiness
-        
-        # give all listeners time to start
-        await websocket.send_json({"type": "info", "message": "all listeners set up, starting verification..."})
-        await asyncio.sleep(2)
-        
-        # now verify all ports concurrently with retries
-        async def verify_port_with_retries(port: int, key: str) -> bool:
-            verification_url = f"http://{node_ip}:{port}"
-            for attempt in range(2):  # max 2 tries per port
-                try:
-                    log.info(
-                        "Verifying node port",
-                        extra={"node_secret_id": node_secret_id, "url": verification_url, "attempt": attempt + 1}
-                    )
-                    res = requests.get(verification_url, timeout=8)  # longer timeout
-                    if res.text == key:
-                        return True
-                    else:
-                        log.warning(f"port {port} returned wrong key: expected {key}, got {res.text}")
-                except Exception as e:
-                    log.warning(f"port {port} verification attempt {attempt + 1} failed: {e}")
-                    if attempt < 1:  # if not the last attempt
-                        await asyncio.sleep(2)  # wait before retry
-            return False
-        
-        # run all verifications concurrently
-        verification_tasks = [
-            verify_port_with_retries(port, challenge_keys[port])
-            for port in ports_to_verify
-        ]
-        results = await asyncio.gather(*verification_tasks, return_exceptions=True)
-        
-        # check results
-        failed_ports = []
-        for i, (port, result) in enumerate(zip(ports_to_verify, results)):
-            if isinstance(result, Exception) or not result:
-                failed_ports.append(port)
-            else:
-                await websocket.send_json({"type": "info", "message": f"port {port} verified successfully."})
-        
-        if failed_ports:
-            raise WebSocketDisconnect(code=1011, reason=f"failed to verify ports: {failed_ports}")
+        if SKIP_PORT_VERIFICATION:
+            await websocket.send_json({"type": "info", "message": f"skipping port verification (debug mode) for {len(ports_to_verify)} ports..."})
+            # just validate that the port range is parsed correctly
+            for port in ports_to_verify:
+                await websocket.send_json({"type": "info", "message": f"port {port} verified (skipped in debug mode)."})
+        else:
+            await websocket.send_json({"type": "info", "message": f"setting up challenge listeners on {len(ports_to_verify)} ports..."})
+            
+            # first, tell the node to set up all challenge listeners
+            challenge_keys = {}
+            for port in ports_to_verify:
+                challenge_key = secrets.token_hex(8)
+                challenge_keys[port] = challenge_key
+                await websocket.send_json({
+                    "type": "challenge",
+                    "message": f"setting up listener on port {port}...",
+                    "port": port,
+                    "key": challenge_key
+                })
+                await websocket.receive_json() # wait for client readiness
+            
+            # give all listeners time to start
+            await websocket.send_json({"type": "info", "message": "all listeners set up, starting verification..."})
+            await asyncio.sleep(2)
+            
+            # now verify all ports concurrently with retries
+            async def verify_port_with_retries(port: int, key: str) -> bool:
+                verification_url = f"http://{node_ip}:{port}"
+                for attempt in range(2):  # max 2 tries per port
+                    try:
+                        log.info(
+                            "Verifying node port",
+                            extra={"node_secret_id": node_secret_id, "url": verification_url, "attempt": attempt + 1}
+                        )
+                        res = requests.get(verification_url, timeout=8)  # longer timeout
+                        if res.text == key:
+                            return True
+                        else:
+                            log.warning(f"port {port} returned wrong key: expected {key}, got {res.text}")
+                    except Exception as e:
+                        log.warning(f"port {port} verification attempt {attempt + 1} failed: {e}")
+                        if attempt < 1:  # if not the last attempt
+                            await asyncio.sleep(2)  # wait before retry
+                return False
+            
+            # run all verifications concurrently
+            verification_tasks = [
+                verify_port_with_retries(port, challenge_keys[port])
+                for port in ports_to_verify
+            ]
+            results = await asyncio.gather(*verification_tasks, return_exceptions=True)
+            
+            # check results
+            failed_ports = []
+            for i, (port, result) in enumerate(zip(ports_to_verify, results)):
+                if isinstance(result, Exception) or not result:
+                    failed_ports.append(port)
+                else:
+                    await websocket.send_json({"type": "info", "message": f"port {port} verified successfully."})
+            
+            if failed_ports:
+                raise WebSocketDisconnect(code=1011, reason=f"failed to verify ports: {failed_ports}")
 
         # 5. final approval
         # get country code from the verified geoip data already in the db

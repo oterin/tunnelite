@@ -182,26 +182,24 @@ async def ping():
 
 benchmark_payload_size = 10 * 1024 * 1024  # 10 mb
 
-class ChallengeHandler(BaseHTTPRequestHandler):
-    challenge_key = "default_key"
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(self.challenge_key.encode('utf-8'))
-    def log_message(self, format, *args):
-        return
-
 class ChallengeRequest(BaseModel):
     port: int
     key: str
 
 def run_challenge_server(port, key):
-    handler = ChallengeHandler
-    handler.challenge_key = key
+    # create a unique handler class for this specific challenge to avoid race conditions
+    class SpecificChallengeHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(key.encode('utf-8'))  # use the key from closure
+        def log_message(self, format, *args):
+            return
+    
     try:
         print(f"info:     attempting to bind challenge listener to 0.0.0.0:{port}")
-        server = HTTPServer(('0.0.0.0', port), handler)  # explicitly bind to all interfaces
+        server = HTTPServer(('0.0.0.0', port), SpecificChallengeHandler)
         print(f"info:     challenge listener successfully bound to 0.0.0.0:{port} with key {key}")
         print(f"info:     waiting for challenge request on port {port}...")
         

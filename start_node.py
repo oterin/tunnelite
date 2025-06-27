@@ -3,8 +3,6 @@ import json
 import os
 import ssl
 import sys
-import pwd
-import grp
 import uuid
 import time
 from multiprocessing import Process, cpu_count
