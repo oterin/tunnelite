@@ -51,6 +51,12 @@ class Node(BaseModel):
     verified_geolocation: dict | None = None
     verified_geolocation_verified_at: dict | None = None
     last_seen_at: float | None = None
+    # registration fields
+    max_clients: int | None = None
+    port_range: str | None = None
+    bandwidth_down_mbps: float | None = None
+    bandwidth_up_mbps: float | None = None
+    node_cert: str | None = None
 
 class ActivationRequest(BaseModel):
     tunnel_id: str

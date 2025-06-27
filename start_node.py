@@ -290,10 +290,15 @@ def get_node_port_range():
             timeout=10, verify=True
         )
         if res.status_code == 200:
-            port_range_str = res.json().get("port_range", "")
-            return parse_port_range(port_range_str)
+            node_data = res.json()
+            print(f"debug:    received node data: {node_data}")
+            port_range_str = node_data.get("port_range", "")
+            print(f"debug:    port_range from server: '{port_range_str}'")
+            parsed_ports = parse_port_range(port_range_str)
+            print(f"debug:    parsed ports: {parsed_ports}")
+            return parsed_ports
         else:
-            print(f"warn:     could not get port range from server: {res.status_code}")
+            print(f"warn:     could not get port range from server: {res.status_code} - {res.text}")
             return []
     except requests.RequestException as e:
         print(f"warn:     could not contact server for port range: {e}")
