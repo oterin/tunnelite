@@ -123,6 +123,8 @@ async def run_interactive_registration(node_secret_id: str):
     ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
+    # debug print admin key being sent
+    print(f"debug: admin key being used: {ADMIN_API_KEY}")
 
     try:
         async with websockets.connect(ws_uri, ssl=True) as websocket:
