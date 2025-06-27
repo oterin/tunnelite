@@ -49,6 +49,14 @@ def get_public_url(base_url: str) -> str:
 
 MAIN_SERVER_URL = get_public_url(RAW_MAIN_SERVER_URL)
 
+# --- static node configuration ---
+DROP_TO_USER = "tunnelite"      # user to drop privs to
+DROP_TO_GROUP = "tunnelite"     # group to drop privs to
+HTTPS_PORT = 443                 # public https port to listen on
+CERT_FILE = "ssl/cert.pem"       # tls cert for node
+KEY_FILE = "ssl/key.pem"         # tls key for node
+SECRET_ID_FILE = "node_secret_id.txt"  # local file storing node uuid
+BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb payload for bandwidth test
 
 # --- phase 1: interactive registration logic ---
 
