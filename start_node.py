@@ -451,8 +451,6 @@ def run_background_service(updated_public_address: str):
 # --- main entrypoint ---
 
 if __name__ == "__main__":
-    global NODE_PUBLIC_ADDRESS # type: ignore
-    
     if sys.platform == "win32":
         sys.exit("error: this script is not supported on windows.")
 
