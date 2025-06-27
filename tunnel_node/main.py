@@ -365,6 +365,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close(code=1011, reason="invalid public url format for tcp tunnel")
                 return
 
+        # send activation success response to client
+        await websocket.send_text(json.dumps({"status": "success", "message": "tunnel activated"}))
+
         while True:
             # this loop keeps the client connection alive and is where
             # data forwarding from client -> public happens.

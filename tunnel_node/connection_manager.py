@@ -83,6 +83,22 @@ class ConnectionManager:
             connection.bytes_out += len(data)
             await connection.response_queue.put(data)
 
+    async def close_tunnel(self, tunnel_id: str) -> bool:
+        """closes a tunnel connection and cleans up its resources."""
+        if tunnel_id in self.tunnels_by_id:
+            connection = self.tunnels_by_id[tunnel_id]
+            try:
+                # close the websocket connection if it's still open
+                if not connection.websocket.client_state.DISCONNECTED:
+                    await connection.websocket.close(code=1000, reason="tunnel closed by server")
+            except Exception as e:
+                print(f"error:    failed to close websocket for tunnel {tunnel_id}: {e}")
+            
+            # clean up the connection
+            self.disconnect(tunnel_id)
+            return True
+        return False
+
     def get_and_reset_metrics(self) -> dict:
         """collects metrics from all active tunnels and resets their counters."""
         metrics_report = {

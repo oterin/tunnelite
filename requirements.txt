@@ -9,3 +9,4 @@ python-json-logger
 websockets
 passlib[bcrypt]
 typer[all]
+rich
