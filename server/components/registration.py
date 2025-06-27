@@ -22,6 +22,9 @@ ADMIN_API_KEY = config.get("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
     raise ValueError("TUNNELITE_ADMIN_KEY not configured")
 
+# debug log for startup
+log.info("registration component expecting admin key", extra={"admin_key_start": ADMIN_API_KEY[:8] + "..."})
+
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
 def parse_port_range(range_str: str) -> List[int]:
