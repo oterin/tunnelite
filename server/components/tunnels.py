@@ -67,9 +67,18 @@ def find_best_node(tunnel_type: str, preferred_country: str) -> Optional[tuple]:
     # filter out nodes that are under high system load
     eligible_nodes = []
     for node in all_nodes:
-        metrics = node.get("metrics", {})
-        cpu = metrics.get("cpu_percent", 0)
-        memory = metrics.get("memory_percent", 0)
+        metrics = node.get("metrics") or {}
+        # handle both flat and nested metrics structures
+        if "system" in metrics:
+            # nested structure: metrics.system.cpu_percent
+            system_metrics = metrics.get("system", {})
+            cpu = system_metrics.get("cpu_percent", 0)
+            memory = system_metrics.get("memory_percent", 0)
+        else:
+            # flat structure: metrics.cpu_percent
+            cpu = metrics.get("cpu_percent", 0)
+            memory = metrics.get("memory_percent", 0)
+        
         if cpu < 90 and memory < 90:
             eligible_nodes.append(node)
 
@@ -84,7 +93,13 @@ def find_best_node(tunnel_type: str, preferred_country: str) -> Optional[tuple]:
         ]
         node["current_load"] = len(active_tunnels)
         # also add a score for sorting, lower is better
-        node["score"] = (node["current_load"] * 0.5) + (node.get("metrics", {}).get("cpu_percent", 0) * 0.5)
+        node_metrics = node.get("metrics") or {}
+        # handle both flat and nested metrics structures for scoring
+        if "system" in node_metrics:
+            cpu_for_score = node_metrics.get("system", {}).get("cpu_percent", 0)
+        else:
+            cpu_for_score = node_metrics.get("cpu_percent", 0)
+        node["score"] = (node["current_load"] * 0.5) + (cpu_for_score * 0.5)
 
     # sort nodes by score to always check the least busy ones first
     eligible_nodes.sort(key=lambda x: x["score"])
