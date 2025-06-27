@@ -71,6 +71,10 @@ class ConnectionManager:
         """retrieves an active connection object by its tunnel id."""
         return self.tunnels_by_id.get(tunnel_id)
 
+    def get_connection_by_hostname(self, hostname: str) -> Optional[Connection]:
+        """retrieves an active connection object by its public hostname."""
+        return self.tunnels_by_hostname.get(hostname)
+
     async def forward_to_proxy(self, tunnel_id: str, data: bytes):
         """forwards a response from the client back to the proxy server via the queue."""
         if tunnel_id in self.tunnels_by_id:

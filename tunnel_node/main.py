@@ -201,14 +201,21 @@ class ChallengeRequest(BaseModel):
 def run_challenge_server(port, key):
     handler = ChallengeHandler
     handler.challenge_key = key
-    server = HTTPServer(('', port), handler)
-    server.handle_request()
-    print(f"info:     challenge listener on port {port} finished")
+    try:
+        server = HTTPServer(('0.0.0.0', port), handler)  # explicitly bind to all interfaces
+        print(f"info:     challenge listener started on 0.0.0.0:{port} with key {key}")
+        server.handle_request()
+        print(f"info:     challenge listener on port {port} handled request and finished")
+    except Exception as e:
+        print(f"error:    challenge listener on port {port} failed: {e}")
 
 @app.post("/internal/setup-challenge-listener")
 async def setup_challenge_listener(req: ChallengeRequest):
+    print(f"info:     setting up challenge listener on port {req.port} with key {req.key}")
     server_thread = threading.Thread(target=run_challenge_server, args=(req.port, req.key), daemon=True)
     server_thread.start()
+    # give the server a moment to start
+    await asyncio.sleep(0.5)
     return {"message": f"challenge listener setup initiated on port {req.port}"}
 
 @app.post("/internal/run-benchmark")
