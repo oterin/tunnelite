@@ -56,3 +56,15 @@ async def startup_event():
     print("info:     starting garbage collector background task...")
     # run garbage collection every 10 minutes
     asyncio.create_task(garbage_collector.run_periodically(interval=600))
+
+# debug test route
+@app.get("/registration/test")
+async def test_registration_router():
+    return {"message": "registration router is working"}
+
+# debug websocket test
+@app.websocket("/test-ws")
+async def test_websocket(websocket):
+    await websocket.accept()
+    await websocket.send_text("websocket test working")
+    await websocket.close()

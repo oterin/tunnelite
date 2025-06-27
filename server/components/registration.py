@@ -60,11 +60,13 @@ async def benchmark_upload(content_length: int = Header(...)):
 @router.websocket("/ws/register-node")
 async def register_node_websocket(websocket: WebSocket):
     log.info("registration websocket connection attempt")
-    await websocket.accept()
-    log.info("registration websocket accepted, waiting for data")
     node_secret_id = None
-
+    
     try:
+        log.info("about to accept websocket")
+        await websocket.accept()
+        log.info("registration websocket accepted, waiting for data")
+        
         # 1. initial handshake and admin authentication
         data = await websocket.receive_json()
         log.info("registration websocket received data", extra={"data": data})
@@ -186,6 +188,12 @@ async def register_node_websocket(websocket: WebSocket):
         )
         if websocket.client_state.CONNECTED:
            await websocket.send_json({"type": "failure", "message": "An internal server error occurred."})
+    except Exception as e:
+        log.error(
+            "websocket accept or early registration error", 
+            extra={"error": str(e)},
+            exc_info=True
+        )
 
 def generate_unique_node_hostname(country_code: str) -> str:
     r = RandomWords()
