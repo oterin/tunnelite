@@ -317,7 +317,10 @@ async def websocket_endpoint(websocket: WebSocket):
     connection = None
 
     try:
-        # 1. activation handshake
+        # 1. accept the connection first!
+        await websocket.accept()
+        
+        # 2. activation handshake
         message_str = await websocket.receive_text()
         message = json.loads(message_str)
 
@@ -328,7 +331,7 @@ async def websocket_endpoint(websocket: WebSocket):
         tunnel_id = message.get("tunnel_id")
         api_key = message.get("api_key")
 
-        # 2. verify with main server
+        # 3. verify with main server
         activation_payload = {
             "tunnel_id": tunnel_id,
             "api_key": api_key,
@@ -344,7 +347,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=1008, reason=error_detail)
             return
 
-        # 3. activation successful. use the authoritative data from the server
+        # 4. activation successful. use the authoritative data from the server
         official_tunnel_data = response.json()
         public_url = official_tunnel_data.get("public_url")
         tunnel_id = official_tunnel_data.get("tunnel_id")
