@@ -59,7 +59,9 @@ async def benchmark_upload(content_length: int = Header(...)):
 
 @router.websocket("/ws/register-node")
 async def register_node_websocket(websocket: WebSocket):
+    log.info("registration websocket connection attempt")
     await websocket.accept()
+    log.info("registration websocket accepted, waiting for data")
     node_secret_id = None
 
     try:

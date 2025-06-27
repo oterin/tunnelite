@@ -29,10 +29,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# add rate limiting middleware
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
+# note: rate limiting middleware disabled because it blocks websockets with 403
 
 # add https redirect middleware if enabled.
 # note: this is only useful if you also listen on port 80.
