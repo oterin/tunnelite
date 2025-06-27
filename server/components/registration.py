@@ -81,8 +81,10 @@ async def register_node_websocket(websocket: WebSocket):
             raise WebSocketDisconnect(code=1008, reason="node_secret_id is required.")
 
         node_record = database.get_node_by_secret_id(node_secret_id)
+        log.info("debug: node_record fetched", extra={"node_record": node_record})
         if not node_record or not node_record.get("public_address"):
-            raise WebSocketDisconnect(code=1008, reason=f"node has not registered its public_address yet. ensure the node is running and has sent a heartbeat.")
+            log.warning("node missing public_address", extra={"node_record": node_record})
+            raise WebSocketDisconnect(code=1008, reason="node missing public_address")
 
         node_ip = websocket.client.host # type: ignore
         database.upsert_node({"node_secret_id": node_secret_id, "status": "benchmarking", "verified_ip_address": node_ip})
