@@ -262,16 +262,20 @@ def start_worker_process(https_socket: socket):
     # disable background tasks in worker processes
     os.environ["ENABLE_BACKGROUND_TASKS"] = "false"
 
-    from tunnel_node.main import on_startup as fastapi_startup
+    # create a fresh, clean fastapi app for each worker to avoid middleware conflicts
+    from fastapi import FastAPI
+    from tunnel_node.main import websocket_endpoint, proxy_router
+    
+    worker_app = FastAPI(title="tunnelite-worker")
+    worker_app.add_api_websocket_route("/ws/connect", websocket_endpoint)
+    worker_app.include_router(proxy_router)
+
     import uvicorn
-
-    fastapi_app.add_event_handler("startup", fastapi_startup)
-
     config = uvicorn.Config(
-        app=fastapi_app,
+        app=worker_app,
         fd=https_socket.fileno(),
         log_level="info",
-        lifespan="on",
+        lifespan="off",  # no startup/shutdown events needed for the isolated worker
         ssl_keyfile=KEY_FILE,
         ssl_certfile=CERT_FILE,
     )
