@@ -86,10 +86,10 @@ async def heartbeat_task():
                     )
             else:
                 # no cert, use old endpoint
-            response = requests.post(
-                f"{config.MAIN_SERVER_URL}/nodes/register",
-                json=node_details
-            )
+                response = requests.post(
+                    f"{config.MAIN_SERVER_URL}/nodes/register",
+                    json=node_details
+                )
                 
             response.raise_for_status()
 
@@ -125,8 +125,8 @@ async def node_control_channel_task():
             async with websockets.connect(control_uri, ssl=True) as websocket:
                 # only send auth message for legacy endpoint
                 if not node_cert:
-                auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
-                await websocket.send(json.dumps(auth_payload))
+                    auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
+                    await websocket.send(json.dumps(auth_payload))
                     
                 print("info:     node control channel connected successfully.")
                 retry_count = 0  # reset retry count on successful connection
@@ -171,12 +171,12 @@ async def on_startup():
     # start background tasks
     print("info:     starting background tasks (heartbeat, control channel)...")
     if ENABLE_BACKGROUND_TASKS:
-    asyncio.create_task(heartbeat_task())
+        asyncio.create_task(heartbeat_task())
     
     # wait a moment before starting control channel to let registration settle
     await asyncio.sleep(5)
     if ENABLE_BACKGROUND_TASKS:
-    asyncio.create_task(node_control_channel_task())
+        asyncio.create_task(node_control_channel_task())
 
 def register_with_main_server():
     global node_status
@@ -232,7 +232,7 @@ def run_challenge_server(port, key):
         
         # set a longer timeout to handle server delays
         server.timeout = 30
-    server.handle_request()
+        server.handle_request()
         print(f"info:     challenge listener on port {port} handled request and finished")
     except OSError as e:
         print(f"error:    failed to bind challenge listener to port {port}: {e}")
@@ -268,7 +268,7 @@ async def setup_challenge_listener(req: ChallengeRequest):
             daemon=True,
             name=f"challenge-listener-{req.port}"
         )
-    server_thread.start()
+        server_thread.start()
         
         # give the server a moment to start and bind
         await asyncio.sleep(1.5)
