@@ -238,10 +238,25 @@ def run_temp_api_server():
     try:
         host = "127.0.0.1"
         port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
+        print(f"info:     temp server will bind to {host}:{port}")
+        
+        # check if port is available
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, port))
+                print(f"info:     port {port} is available for temp server")
+            except OSError as e:
+                print(f"error:    port {port} is not available: {e}")
+                return
+        
         from tunnel_node.main import app as temp_app
-        uvicorn.run(temp_app, host=host, port=port, log_level="warning")
+        print(f"info:     starting uvicorn on {host}:{port}")
+        uvicorn.run(temp_app, host=host, port=port, log_level="info")  # changed to info for better debugging
     except Exception as e:
         print(f"error: failed to start temporary server: {e}")
+        import traceback
+        print(f"traceback: {traceback.format_exc()}")
 
 def get_node_cert() -> str:
     """gets the stored node certificate"""
@@ -296,6 +311,25 @@ if __name__ == "__main__":
         temp_server_process.start()
         print(f"info:     temporary api server started with pid: {temp_server_process.pid}")
         time.sleep(3)
+
+        # verify the temp server is responding
+        temp_port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
+        temp_url = f"http://127.0.0.1:{temp_port}"
+        for attempt in range(10):  # try for up to 10 seconds
+            try:
+                response = requests.get(f"{temp_url}/ping", timeout=2)
+                if response.status_code == 200:
+                    print(f"info:     temporary server is responding on {temp_url}")
+                    break
+            except requests.RequestException:
+                pass
+            time.sleep(1)
+            print(f"info:     waiting for temporary server... (attempt {attempt + 1}/10)")
+        else:
+            print("error:    temporary server is not responding after 10 seconds")
+            temp_server_process.terminate()
+            temp_server_process.join()
+            sys.exit("error: could not start temporary api server")
 
         registration_success = asyncio.run(run_interactive_registration(node_secret_id))
 
