@@ -28,7 +28,7 @@ async def run_registration():
         print(f"error: could not find {SECRET_ID_FILE}. please start the tunnel_node application once to generate it.")
         return
 
-    uri = f"{WS_MAIN_SERVER_URL}/ws/register-node"
+    uri = f"{WS_MAIN_SERVER_URL}/registration/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {uri}...")
 

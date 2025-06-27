@@ -20,7 +20,7 @@ except FileNotFoundError:
     pass
 
 async def run_registration():
-    uri = f"{WS_MAIN_SERVER_URL}/ws/register-node"
+    uri = f"{WS_MAIN_SERVER_URL}/registration/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {uri}...")
 

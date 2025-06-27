@@ -41,7 +41,7 @@ async def test_registration_websocket():
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         
-        async with websockets.connect(f"{WS_URL}/ws/register-node", ssl=ssl_context) as ws:
+        async with websockets.connect(f"{WS_URL}/registration/ws/register-node", ssl=ssl_context) as ws:
             print("   websocket connected!")
             
             # send auth data
@@ -59,6 +59,23 @@ async def test_registration_websocket():
     except Exception as e:
         print(f"   error: {e}")
 
+async def test_registration_websocket_minimal():
+    print("4. testing registration websocket minimal...")
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    
+    try:
+        uri = "wss://api.tunnelite.net/registration/ws/register-node"
+        async with websockets.connect(uri, ssl=ssl_context) as websocket:
+            print("   connected to registration websocket")
+            # just send something minimal to see if connection works
+            await websocket.send(json.dumps({"test": "minimal"}))
+            response = await websocket.recv()
+            print(f"   response: {response}")
+    except Exception as e:
+        print(f"   error: {e}")
+
 async def main():
     print("tunnelite websocket diagnostics")
     print("=" * 40)
@@ -66,6 +83,7 @@ async def main():
     await test_registration_router()
     await test_basic_websocket()  
     await test_registration_websocket()
+    await test_registration_websocket_minimal()
     
     print("\ntest complete!")
 

@@ -121,7 +121,7 @@ async def run_interactive_registration(node_secret_id: str):
     except requests.RequestException as e:
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
-    ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
+    ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/registration/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
 
