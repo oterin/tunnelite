@@ -173,12 +173,21 @@ async def run_interactive_registration(node_secret_id: str):
                         # connect to the local temporary api server, not the public address
                         local_port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
                         local_api_url = f"http://127.0.0.1:{local_port}"
-                        requests.post(
+                        
+                        # send the challenge setup request
+                        response = requests.post(
                             f"{local_api_url}/internal/setup-challenge-listener",
-                            json={"port": port, "key": key}, timeout=3
+                            json={"port": port, "key": key}, 
+                            timeout=10  # longer timeout for setup
                         )
-                        print(f"[client] instructed node to listen on port {port}.")
-                        await websocket.send(json.dumps({"type": "ready_for_challenge"}))
+                        
+                        if response.status_code == 200:
+                            print(f"[client] challenge listener set up on port {port}.")
+                            await websocket.send(json.dumps({"type": "ready_for_challenge"}))
+                        else:
+                            print(f"[client] error: challenge setup failed with status {response.status_code}: {response.text}")
+                            return False
+                            
                     except requests.RequestException as e:
                         print(f"[client] error: could not contact local api for challenge: {e}")
                         return False

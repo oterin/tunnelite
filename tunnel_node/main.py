@@ -205,14 +205,16 @@ def run_challenge_server(port, key):
         print(f"info:     challenge listener successfully bound to 0.0.0.0:{port} with key {key}")
         print(f"info:     waiting for challenge request on port {port}...")
         
-        # set a timeout so it doesn't hang forever
-        server.timeout = 10
+        # set a longer timeout to handle server delays
+        server.timeout = 30
         server.handle_request()
         print(f"info:     challenge listener on port {port} handled request and finished")
     except OSError as e:
         print(f"error:    failed to bind challenge listener to port {port}: {e}")
+        raise  # re-raise so the API endpoint can report the error
     except Exception as e:
         print(f"error:    challenge listener on port {port} failed: {e}")
+        raise  # re-raise so the API endpoint can report the error
 
 def is_port_available(port):
     """check if a port is available for binding"""
@@ -233,20 +235,30 @@ async def setup_challenge_listener(req: ChallengeRequest):
         print(f"error:    {error_msg}")
         raise HTTPException(status_code=400, detail=error_msg)
     
-    # start the server in a separate thread
-    server_thread = threading.Thread(
-        target=run_challenge_server, 
-        args=(req.port, req.key), 
-        daemon=True,
-        name=f"challenge-listener-{req.port}"
-    )
-    server_thread.start()
-    
-    # give the server a moment to start and bind
-    await asyncio.sleep(1.0)
-    
-    print(f"info:     challenge listener thread started for port {req.port}")
-    return {"message": f"challenge listener setup initiated on port {req.port}"}
+    try:
+        # start the server in a separate thread
+        server_thread = threading.Thread(
+            target=run_challenge_server, 
+            args=(req.port, req.key), 
+            daemon=True,
+            name=f"challenge-listener-{req.port}"
+        )
+        server_thread.start()
+        
+        # give the server a moment to start and bind
+        await asyncio.sleep(1.5)
+        
+        # verify the thread is still alive (didn't crash immediately)
+        if not server_thread.is_alive():
+            raise HTTPException(status_code=500, detail=f"challenge listener thread for port {req.port} failed to start")
+        
+        print(f"info:     challenge listener thread started successfully for port {req.port}")
+        return {"message": f"challenge listener setup completed on port {req.port}"}
+        
+    except Exception as e:
+        error_msg = f"failed to set up challenge listener on port {req.port}: {str(e)}"
+        print(f"error:    {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/internal/run-benchmark")
 async def benchmark_post(request: FastAPIRequest):
