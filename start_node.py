@@ -50,7 +50,6 @@ MAIN_SERVER_URL = get_public_url(RAW_MAIN_SERVER_URL)
 # --- static node configuration ---
 DROP_TO_USER = "tunnelite"      # user to drop privs to
 DROP_TO_GROUP = "tunnelite"     # group to drop privs to
-HTTPS_PORT = 443                 # public https port to listen on
 CERT_FILE = "ssl/cert.pem"       # tls cert for node
 KEY_FILE = "ssl/key.pem"         # tls key for node
 SECRET_ID_FILE = "node_secret_id.txt"  # local file storing node uuid
@@ -209,6 +208,8 @@ async def run_interactive_registration(node_secret_id: str):
 
 def drop_privileges(uid_name: str, gid_name: str):
     try:
+        import pwd
+        import grp
         new_uid = pwd.getpwnam(uid_name).pw_uid
         new_gid = grp.getgrnam(gid_name).gr_gid
     except KeyError:
@@ -278,6 +279,54 @@ def save_node_cert(cert: str):
     with open(CERT_TOKEN_FILE, "w") as f:
         f.write(cert)
     print(f"info:     node certificate saved")
+
+def get_node_port_range():
+    """gets the node's registered port range from the server"""
+    node_secret_id = get_node_secret_id()
+    try:
+        res = requests.get(
+            f"{MAIN_SERVER_URL}/nodes/me",
+            headers={"x-node-secret-id": node_secret_id},
+            timeout=10, verify=True
+        )
+        if res.status_code == 200:
+            port_range_str = res.json().get("port_range", "")
+            return parse_port_range(port_range_str)
+        else:
+            print(f"warn:     could not get port range from server: {res.status_code}")
+            return []
+    except requests.RequestException as e:
+        print(f"warn:     could not contact server for port range: {e}")
+        return []
+
+def parse_port_range(range_str: str):
+    """parse port range string like '8202-8219' into list of ports"""
+    ports = set()
+    if not range_str:
+        return []
+    
+    parts = [p.strip() for p in range_str.split(';')]
+    for part in parts:
+        if not part: 
+            continue
+        if '-' in part:
+            start, end = part.split('-')
+            ports.update(range(int(start), int(end) + 1))
+        else:
+            ports.add(int(part))
+    return sorted(list(ports))
+
+def find_available_port_in_range(port_list):
+    """find the first available port from the list"""
+    import socket
+    for port in port_list:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', port))
+                return port
+        except OSError:
+            continue
+    return None
 
 # --- main entrypoint ---
 
@@ -355,14 +404,24 @@ if __name__ == "__main__":
     if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):
         sys.exit(f"error: ssl certificate '{CERT_FILE}' or key '{KEY_FILE}' not found.")
 
+    # get available ports from the node's registered range
+    available_ports = get_node_port_range()
+    if not available_ports:
+        sys.exit("error: could not get port range from server or no ports available")
+    
+    # find an available port in the range
+    chosen_port = find_available_port_in_range(available_ports)
+    if not chosen_port:
+        sys.exit(f"error: no available ports in range {available_ports}")
+
     try:
         https_socket = socket(AF_INET, SOCK_STREAM)
         https_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        https_socket.bind(('', HTTPS_PORT))
+        https_socket.bind(('', chosen_port))
         https_socket.listen(128)
-        print(f"info:     https socket bound to 0.0.0.0:{HTTPS_PORT} by main process (pid: {os.getpid()})")
+        print(f"info:     https socket bound to 0.0.0.0:{chosen_port} by main process (pid: {os.getpid()})")
     except Exception as e:
-        sys.exit(f"error: failed to bind socket: {e}")
+        sys.exit(f"error: failed to bind socket on port {chosen_port}: {e}")
 
     num_workers = cpu_count()
     print(f"info:     spawning {num_workers} worker processes...")
