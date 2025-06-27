@@ -42,24 +42,37 @@ def get_available_tcp_port(node: dict) -> Optional[int]:
     if not port_range:
         return None
 
-    # get all ports currently used by tcp/udp tunnels
+    # get all ports currently used by tcp/udp tunnels across ALL nodes to prevent conflicts
     active_tunnels = database.get_all_tunnels()
     used_ports = set()
     for t in active_tunnels:
-        if t.get("node_secret_id") == node["node_secret_id"] and t.get("tunnel_type") in ["tcp", "udp"]:
+        if t.get("tunnel_type") in ["tcp", "udp"] and t.get("status") in ["active", "pending"]:
             try:
                 # extract port from url like "tcp://hostname:8202"
-                port = int(t["public_url"].split(":")[-1])  # get the last part after splitting on ":"
+                port = int(t["public_url"].split(":")[-1])
                 used_ports.add(port)
             except (IndexError, ValueError):
                 continue
 
+    # also exclude the node's main server port to prevent conflicts
+    node_address = node.get("public_address", "")
+    if node_address and ":" in node_address:
+        try:
+            main_port = int(node_address.split(":")[-1])
+            used_ports.add(main_port)
+        except (ValueError, IndexError):
+            pass
+
+    print(f"debug:    port allocation for node {node['node_secret_id'][:8]}: range={port_range}, used_ports={sorted(used_ports)}")
+
     # find a free port within the range
     for port in port_range:
         if port not in used_ports:
+            print(f"debug:    allocated port {port} for tcp tunnel")
             return port
 
-    # no free ports found, rip in pieces.
+    # no free ports found
+    print(f"error:    no available ports in range {port_range}, all used: {sorted(used_ports)}")
     return None
 
 def find_best_node(tunnel_type: str, preferred_country: str, ping_data: Optional[dict] = None) -> Optional[tuple]:

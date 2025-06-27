@@ -14,7 +14,10 @@ class Connection:
         # metrics for this connection
         self.bytes_in: int = 0         # data from public internet -> user client
         self.bytes_out: int = 0        # data from user client -> public internet
+        self.packets_in: int = 0       # packet count in
+        self.packets_out: int = 0      # packet count out
         self.connected_at: float = time.time()
+        self.last_activity: float = time.time()
 
 class ConnectionManager:
     def __init__(self):
@@ -32,7 +35,7 @@ class ConnectionManager:
         if "://" not in public_hostname:
             self.tunnels_by_hostname[public_hostname] = connection
 
-        print(f"info:     tunnel activated for {public_hostname}")
+        print(f"info:     tunnel activated for {public_hostname} (id: {tunnel_id[:8]})")
         return connection
 
     def disconnect(self, tunnel_id: str):
@@ -42,18 +45,26 @@ class ConnectionManager:
             if connection.public_hostname in self.tunnels_by_hostname:
                 del self.tunnels_by_hostname[connection.public_hostname]
 
-            # if this was a tcp tunnel, cancel its server task
-            if connection.tcp_server_task:
+            # if this was a tcp tunnel, cancel its server task immediately
+            if connection.tcp_server_task and not connection.tcp_server_task.done():
                 connection.tcp_server_task.cancel()
+                print(f"info:     cancelled tcp server task for tunnel {tunnel_id[:8]}")
 
-            print(f"info:     tunnel disconnected for {connection.public_hostname}")
+            # calculate session stats
+            duration = time.time() - connection.connected_at
+            print(f"info:     tunnel disconnected for {connection.public_hostname}: "
+                  f"duration={duration:.1f}s, "
+                  f"packets_in={connection.packets_in}, packets_out={connection.packets_out}, "
+                  f"bytes_in={connection.bytes_in}, bytes_out={connection.bytes_out}")
 
     async def forward_to_client(self, tunnel_id: str, data: bytes):
         """forwards raw data from a public connection (http or tcp) to the client."""
         if tunnel_id in self.tunnels_by_id:
             connection = self.tunnels_by_id[tunnel_id]
-            # increment bytes_in as data flows into the tunnel from the public
+            # increment metrics as data flows into the tunnel from the public
             connection.bytes_in += len(data)
+            connection.packets_in += 1
+            connection.last_activity = time.time()
             await connection.websocket.send_bytes(data)
 
     async def get_http_response_from_client(self, public_hostname: str, timeout: int = 10) -> bytes:
@@ -79,22 +90,25 @@ class ConnectionManager:
         """forwards a response from the client back to the proxy server via the queue."""
         if tunnel_id in self.tunnels_by_id:
             connection = self.tunnels_by_id[tunnel_id]
-            # increment bytes_out as data flows out of the tunnel to the public
+            # increment metrics as data flows out of the tunnel to the public
             connection.bytes_out += len(data)
+            connection.packets_out += 1
+            connection.last_activity = time.time()
             await connection.response_queue.put(data)
 
     async def close_tunnel(self, tunnel_id: str) -> bool:
-        """closes a tunnel connection and cleans up its resources."""
+        """closes a tunnel connection and cleans up its resources immediately."""
         if tunnel_id in self.tunnels_by_id:
             connection = self.tunnels_by_id[tunnel_id]
             try:
                 # close the websocket connection if it's still open
                 if not connection.websocket.client_state.DISCONNECTED:
                     await connection.websocket.close(code=1000, reason="tunnel closed by server")
+                    print(f"info:     forcibly closed websocket for tunnel {tunnel_id[:8]}")
             except Exception as e:
                 print(f"error:    failed to close websocket for tunnel {tunnel_id}: {e}")
             
-            # clean up the connection
+            # clean up the connection immediately
             self.disconnect(tunnel_id)
             return True
         return False
@@ -106,17 +120,41 @@ class ConnectionManager:
             "tunnels": []
         }
         for tunnel_id, connection in self.tunnels_by_id.items():
+            uptime = time.time() - connection.connected_at
+            idle_time = time.time() - connection.last_activity
+            
             metrics_report["tunnels"].append({
                 "tunnel_id": tunnel_id,
+                "public_hostname": connection.public_hostname,
                 "bytes_in": connection.bytes_in,
                 "bytes_out": connection.bytes_out,
+                "packets_in": connection.packets_in,
+                "packets_out": connection.packets_out,
                 "connected_at": connection.connected_at,
+                "uptime_seconds": uptime,
+                "idle_seconds": idle_time,
             })
             # reset counters for the next interval
             connection.bytes_in = 0
             connection.bytes_out = 0
+            connection.packets_in = 0
+            connection.packets_out = 0
 
         return metrics_report
+
+    def cleanup_stale_connections(self, max_idle_seconds: int = 300):
+        """cleanup connections that have been idle for too long"""
+        current_time = time.time()
+        stale_tunnels = []
+        
+        for tunnel_id, connection in self.tunnels_by_id.items():
+            idle_time = current_time - connection.last_activity
+            if idle_time > max_idle_seconds:
+                stale_tunnels.append(tunnel_id)
+        
+        for tunnel_id in stale_tunnels:
+            print(f"info:     cleaning up stale tunnel {tunnel_id[:8]} (idle for {idle_time:.1f}s)")
+            asyncio.create_task(self.close_tunnel(tunnel_id))
 
 # create a single, shared instance for the application.
 manager = ConnectionManager()

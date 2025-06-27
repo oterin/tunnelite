@@ -1,6 +1,8 @@
 import anyio
 from fastapi import APIRouter, Request, Response, HTTPException, status
 from .connection_manager import manager
+from .network_logger import network_logger, NetworkEvent, NetworkEventType
+import time
 
 # a new router for the proxy logic.
 # it has no prefix, so its routes are at the root of the app.
@@ -25,6 +27,17 @@ async def http_proxy_catch_all(request: Request, full_path: str):
     # 2. security check: ensure this node is authoritative for the hostname.
     connection = manager.get_connection_by_hostname(host_header)
     if not connection:
+        # log error event
+        network_logger.log_event(NetworkEvent(
+            timestamp=time.time(),
+            event_type=NetworkEventType.ERROR,
+            client_ip=request.client.host,
+            method=request.method,
+            path=f"/{full_path}",
+            error_message=f"tunnel for {host_header} not found",
+            metadata={"host_header": host_header}
+        ))
+        
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"tunnel for {host_header} not found or not active on this node."
@@ -42,7 +55,21 @@ async def http_proxy_catch_all(request: Request, full_path: str):
 
     # encode headers and add the body
     raw_request = f"{raw_headers}\r\n\r\n".encode('utf-8')
-    raw_request += await request.body()
+    request_body = await request.body()
+    raw_request += request_body
+
+    # log incoming http request
+    network_logger.log_event(NetworkEvent(
+        timestamp=time.time(),
+        event_type=NetworkEventType.HTTP_REQUEST,
+        tunnel_id=connection.tunnel_id,
+        client_ip=request.client.host,
+        method=request.method,
+        path=f"/{full_path}",
+        bytes_transferred=len(raw_request),
+        direction="in",
+        protocol="http"
+    ))
 
     # 4. forward the reconstructed request to the correct client.
     await manager.forward_to_client(connection.tunnel_id, raw_request)
@@ -72,8 +99,32 @@ async def http_proxy_catch_all(request: Request, full_path: str):
         response_headers.pop("transfer-encoding", None)
         response_headers.pop("connection", None)
 
+        # log outgoing http response
+        network_logger.log_event(NetworkEvent(
+            timestamp=time.time(),
+            event_type=NetworkEventType.HTTP_RESPONSE,
+            tunnel_id=connection.tunnel_id,
+            client_ip=request.client.host,
+            method=request.method,
+            path=f"/{full_path}",
+            status_code=status_code,
+            bytes_transferred=len(raw_response),
+            direction="out",
+            protocol="http"
+        ))
+
         return Response(content=body_bytes, status_code=status_code, headers=response_headers)
     except Exception as e:
+        # log parsing error
+        network_logger.log_event(NetworkEvent(
+            timestamp=time.time(),
+            event_type=NetworkEventType.ERROR,
+            tunnel_id=connection.tunnel_id,
+            client_ip=request.client.host,
+            error_message=f"failed to parse client response: {e}",
+            metadata={"raw_response_length": len(raw_response)}
+        ))
+        
         print(f"error: could not parse client response: {e}")
         return Response(content=b"bad gateway", status_code=502)
 
@@ -81,17 +132,63 @@ async def http_proxy_catch_all(request: Request, full_path: str):
 
 async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: str):
     """handles a single public tcp connection and proxies data in both directions."""
-    print(f"info:     new tcp connection for tunnel {tunnel_id}")
+    client_addr = "unknown"
+    client_port = None
+    
+    try:
+        if hasattr(client_stream, 'socket') and hasattr(client_stream.socket, 'getpeername'):
+            client_addr, client_port = client_stream.socket.getpeername()
+    except:
+        pass
+    
+    # log connection open
+    network_logger.log_event(NetworkEvent(
+        timestamp=time.time(),
+        event_type=NetworkEventType.CONNECTION_OPEN,
+        tunnel_id=tunnel_id,
+        client_ip=client_addr,
+        port=client_port,
+        protocol="tcp"
+    ))
+    
+    print(f"info:     new tcp connection for tunnel {tunnel_id} from {client_addr}:{client_port}")
+    
+    packet_count_in = 0
+    packet_count_out = 0
+    bytes_in = 0
+    bytes_out = 0
+    start_time = time.time()
+    
     try:
         async with anyio.create_task_group() as tg:
             async def public_to_ws():
+                nonlocal packet_count_in, bytes_in
                 while True:
                     data = await client_stream.receive(4096)
                     if not data: break
+                    
+                    packet_count_in += 1
+                    bytes_in += len(data)
+                    
+                    # log tcp packet
+                    network_logger.log_event(NetworkEvent(
+                        timestamp=time.time(),
+                        event_type=NetworkEventType.TCP_PACKET,
+                        tunnel_id=tunnel_id,
+                        client_ip=client_addr,
+                        bytes_transferred=len(data),
+                        direction="in",
+                        protocol="tcp",
+                        metadata={"packet_number": packet_count_in}
+                    ))
+                    
+                    print(f"tcp:      tunnel {tunnel_id[:8]} → client: packet #{packet_count_in}, {len(data)} bytes (total: {bytes_in} bytes)")
+                    
                     await manager.forward_to_client(tunnel_id, data)
                 tg.cancel_scope.cancel()
 
             async def ws_to_public():
+                nonlocal packet_count_out, bytes_out
                 connection = manager.get_connection_by_id(tunnel_id)
                 if not connection:
                     tg.cancel_scope.cancel()
@@ -100,15 +197,61 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
                 while True:
                     response_data = await connection.response_queue.get()
                     if response_data is None: break
+                    
+                    packet_count_out += 1
+                    bytes_out += len(response_data)
+                    
+                    # log tcp packet
+                    network_logger.log_event(NetworkEvent(
+                        timestamp=time.time(),
+                        event_type=NetworkEventType.TCP_PACKET,
+                        tunnel_id=tunnel_id,
+                        client_ip=client_addr,
+                        bytes_transferred=len(response_data),
+                        direction="out",
+                        protocol="tcp",
+                        metadata={"packet_number": packet_count_out}
+                    ))
+                    
+                    print(f"tcp:      tunnel {tunnel_id[:8]} ← client: packet #{packet_count_out}, {len(response_data)} bytes (total: {bytes_out} bytes)")
+                    
                     await client_stream.send(response_data)
                 tg.cancel_scope.cancel()
 
             tg.start_soon(public_to_ws)
             tg.start_soon(ws_to_public)
     except Exception as e:
+        # log connection error
+        network_logger.log_event(NetworkEvent(
+            timestamp=time.time(),
+            event_type=NetworkEventType.ERROR,
+            tunnel_id=tunnel_id,
+            client_ip=client_addr,
+            error_message=f"tcp proxy handler failed: {e}",
+            metadata={"packets_in": packet_count_in, "packets_out": packet_count_out}
+        ))
+        
         print(f"error:    tcp proxy handler for {tunnel_id} failed: {e}")
     finally:
-        print(f"info:     closing tcp connection for tunnel {tunnel_id}")
+        duration = time.time() - start_time
+        
+        # log connection close
+        network_logger.log_event(NetworkEvent(
+            timestamp=time.time(),
+            event_type=NetworkEventType.CONNECTION_CLOSE,
+            tunnel_id=tunnel_id,
+            client_ip=client_addr,
+            protocol="tcp",
+            metadata={
+                "duration": duration,
+                "packets_in": packet_count_in,
+                "packets_out": packet_count_out,
+                "bytes_in": bytes_in,
+                "bytes_out": bytes_out
+            }
+        ))
+        
+        print(f"info:     tcp connection closed for tunnel {tunnel_id}: {packet_count_in} packets in ({bytes_in} bytes), {packet_count_out} packets out ({bytes_out} bytes)")
         await client_stream.aclose()
 
 async def start_tcp_listener(tunnel_id: str, port: int):
@@ -119,4 +262,14 @@ async def start_tcp_listener(tunnel_id: str, port: int):
         handler = lambda client: tcp_proxy_handler(client, tunnel_id)
         await listener.serve(handler)
     except Exception as e:
+        # log listener error
+        network_logger.log_event(NetworkEvent(
+            timestamp=time.time(),
+            event_type=NetworkEventType.ERROR,
+            tunnel_id=tunnel_id,
+            port=port,
+            error_message=f"could not start tcp listener on port {port}: {e}",
+            protocol="tcp"
+        ))
+        
         print(f"error:    could not start tcp listener on port {port}: {e}")

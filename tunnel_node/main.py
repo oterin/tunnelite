@@ -17,6 +17,7 @@ import os
 from . import config
 from .connection_manager import manager
 from .proxy_server import start_tcp_listener, proxy_router
+from .network_logger import network_logger, NetworkEvent, NetworkEventType
 
 SECRET_ID_FILE = "node_secret_id.txt"
 NODE_SECRET_ID = None
@@ -71,7 +72,19 @@ async def heartbeat_task():
         }
 
         try:
-            print(f"info:     ({time.ctime()}) sending heartbeat...")
+            # log heartbeat event
+            network_logger.log_event(NetworkEvent(
+                timestamp=time.time(),
+                event_type=NetworkEventType.HEARTBEAT,
+                metadata={
+                    "active_tunnels": tunnel_metrics['total_active_tunnels'],
+                    "cpu_percent": cpu_percent,
+                    "memory_percent": memory_info.percent,
+                    "node_status": node_status
+                }
+            ))
+            
+            print(f"info:     ({time.ctime()}) sending heartbeat with {tunnel_metrics['total_active_tunnels']} active tunnels...")
             
             # try jwt heartbeat first if we have a cert
             if node_cert:
@@ -100,11 +113,39 @@ async def heartbeat_task():
             new_status = response_data.get("status", "pending")
 
             if new_status != node_status:
+                # log status change
+                network_logger.log_event(NetworkEvent(
+                    timestamp=time.time(),
+                    event_type=NetworkEventType.NODE_STATUS,
+                    metadata={
+                        "old_status": node_status,
+                        "new_status": new_status
+                    }
+                ))
+                
                 print(f"info:     status changed from '{node_status}' to '{new_status}'.")
                 node_status = new_status
 
         except requests.RequestException as e:
+            # log heartbeat error
+            network_logger.log_event(NetworkEvent(
+                timestamp=time.time(),
+                event_type=NetworkEventType.ERROR,
+                error_message=f"heartbeat failed: {e}",
+                metadata={"active_tunnels": tunnel_metrics['total_active_tunnels']}
+            ))
+            
             print(f"error:    heartbeat failed: {e}")
+
+async def cleanup_task():
+    """background task to clean up stale connections"""
+    while True:
+        await asyncio.sleep(30)  # check every 30 seconds
+        try:
+            # cleanup connections idle for more than 5 minutes
+            manager.cleanup_stale_connections(max_idle_seconds=300)
+        except Exception as e:
+            print(f"error:    cleanup task failed: {e}")
 
 async def node_control_channel_task():
     retry_count = 0
@@ -172,9 +213,10 @@ async def on_startup():
     register_with_main_server()
 
     # start background tasks
-    print("info:     starting background tasks (heartbeat, control channel)...")
+    print("info:     starting background tasks (heartbeat, control channel, cleanup)...")
     if ENABLE_BACKGROUND_TASKS:
         asyncio.create_task(heartbeat_task())
+        asyncio.create_task(cleanup_task())
     
     # wait a moment before starting control channel to let registration settle
     await asyncio.sleep(5)
@@ -206,11 +248,22 @@ def register_with_main_server():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "node_status": node_status}
+    return {"status": "healthy", "node_secret_id": NODE_SECRET_ID}
 
 @app.get("/ping")
 async def ping():
-    return {"ack": "pong", "node_secret_id": NODE_SECRET_ID}
+    return {"message": "pong", "timestamp": time.time()}
+
+@app.get("/debug/network-stats")
+async def get_network_stats():
+    """debug endpoint to get networking statistics"""
+    return network_logger.get_stats()
+
+@app.get("/debug/network-events")
+async def get_network_events(count: int = 50):
+    """debug endpoint to get recent network events"""
+    events = network_logger.get_recent_events(count)
+    return [event.to_dict() for event in events]
 
 benchmark_payload_size = 10 * 1024 * 1024  # 10 mb
 
@@ -315,6 +368,7 @@ async def teardown_tunnel(req: TeardownRequest):
 @app.websocket("/ws/connect")
 async def websocket_endpoint(websocket: WebSocket):
     connection = None
+    tunnel_id = None
     print("info:     /ws/connect endpoint entered, awaiting new connection...")
     try:
         # 1. accept the connection first!
@@ -366,6 +420,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
         connection = await manager.connect(tunnel_id, public_hostname, websocket)
 
+        # log tunnel activation
+        network_logger.log_event(NetworkEvent(
+            timestamp=time.time(),
+            event_type=NetworkEventType.TUNNEL_ACTIVATE,
+            tunnel_id=tunnel_id,
+            protocol=tunnel_type,
+            metadata={
+                "public_url": public_url,
+                "public_hostname": public_hostname,
+                "local_port": official_tunnel_data.get("local_port")
+            }
+        ))
+
         # for tcp tunnels, we need to start a dedicated listener on the assigned port
         if tunnel_type in ["tcp", "udp"]:
             try:
@@ -383,6 +450,17 @@ async def websocket_endpoint(websocket: WebSocket):
         # send activation success response to client
         await websocket.send_text(json.dumps({"status": "success", "message": "tunnel activated"}))
 
+        # notify main server that tunnel is now active
+        try:
+            requests.post(
+                f"{config.MAIN_SERVER_URL}/internal/tunnels/{tunnel_id}/activate",
+                json={"node_secret_id": NODE_SECRET_ID},
+                timeout=3
+            )
+            print(f"info:     notified main server that tunnel {tunnel_id[:8]} is active")
+        except requests.RequestException as e:
+            print(f"warn:     failed to notify main server of activation: {e}")
+
         while True:
             # this loop keeps the client connection alive and is where
             # data forwarding from client -> public happens.
@@ -396,26 +474,43 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect as e:
         print(f"info:     websocket disconnected cleanly (code: {e.code}, reason: {e.reason})")
-        if connection:
+    except Exception as e:
+        print(f"error:    an unexpected error occurred in websocket: {type(e).__name__} - {e}")
+    finally:
+        # immediate cleanup when client disconnects
+        if connection and tunnel_id:
+            print(f"info:     starting immediate cleanup for tunnel {tunnel_id[:8]}")
+            
+            # log tunnel deactivation
+            network_logger.log_event(NetworkEvent(
+                timestamp=time.time(),
+                event_type=NetworkEventType.TUNNEL_DEACTIVATE,
+                tunnel_id=tunnel_id,
+                metadata={
+                    "duration": time.time() - connection.connected_at if connection else 0
+                }
+            ))
+            
             manager.disconnect(connection.tunnel_id)
+            
+            # notify main server immediately about deactivation
             try:
                 deactivation_payload = {"node_secret_id": NODE_SECRET_ID}
-                requests.post(
-                    f"{config.MAIN_SERVER_URL}/internal/tunnels/{connection.tunnel_id}/deactivate",
+                response = requests.post(
+                    f"{config.MAIN_SERVER_URL}/internal/tunnels/{tunnel_id}/deactivate",
                     json=deactivation_payload,
                     timeout=3
                 )
-            except requests.RequestException as req_e:
-                print(f"error:    failed to report deactivation for {connection.tunnel_id}: {req_e}")
+                if response.ok:
+                    print(f"info:     notified main server that tunnel {tunnel_id[:8]} is deactivated")
+                else:
+                    print(f"warn:     main server returned {response.status_code} for deactivation")
+            except requests.RequestException as e:
+                print(f"error:    failed to report deactivation for {tunnel_id[:8]}: {e}")
         else:
             print("info:     client disconnected before activating a tunnel.")
-    except Exception as e:
-        print(f"error:    an unexpected error occurred in websocket: {type(e).__name__} - {e}")
-        if connection and not connection.websocket.client_state.DISCONNECTED:
-            await connection.websocket.close(code=1011)
-            manager.disconnect(connection.tunnel_id)
-    finally:
-        print("info:     /ws/connect endpoint exited.")
+        
+        print(f"info:     /ws/connect endpoint exited, cleanup complete.")
 
 def get_node_cert() -> str:
     """get node certificate from file"""

@@ -45,6 +45,58 @@ app = typer.Typer(
     add_completion=False,
 )
 
+# add network logging functionality to the tui
+network_events = []
+max_network_events = 100
+
+def add_network_event(event_type: str, message: str, metadata: dict = None):
+    """add a network event to the local log"""
+    global network_events
+    timestamp = time.time()
+    event = {
+        "timestamp": timestamp,
+        "type": event_type,
+        "message": message,
+        "metadata": metadata or {}
+    }
+    network_events.append(event)
+    if len(network_events) > max_network_events:
+        network_events.pop(0)
+
+def format_network_event(event):
+    """format a network event for display in the tui"""
+    timestamp = time.strftime("%H:%M:%S", time.localtime(event["timestamp"]))
+    event_type = event["type"]
+    message = event["message"]
+    
+    # color code based on event type
+    if event_type == "connection":
+        color = "green"
+        icon = "●"
+    elif event_type == "request":
+        color = "cyan" 
+        icon = "→"
+    elif event_type == "response":
+        status = event.get("metadata", {}).get("status_code", 200)
+        if status < 300:
+            color = "green"
+        elif status < 400:
+            color = "yellow"
+        else:
+            color = "red"
+        icon = "←"
+    elif event_type == "error":
+        color = "red"
+        icon = "✗"
+    elif event_type == "tunnel":
+        color = "blue"
+        icon = "▲"
+    else:
+        color = "dim"
+        icon = "•"
+    
+    return f"[dim]{timestamp}[/dim] [{color}]{icon}[/{color}] {message}"
+
 # --- helper functions ---
 async def ping_node(hostname: str) -> Optional[float]:
     """pings a node and returns latency in milliseconds, or None if unreachable"""
@@ -255,66 +307,126 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
     headers = {"x-api-key": api_key}
     start_time = time.time()
     request_count = 0
+    bytes_in = 0
+    bytes_out = 0
+    request_log = []
     
+    # tmux-like layout with multiple panes
     layout = Layout()
     layout.split_column(
-        Layout(name="header", size=7),
-        Layout(name="body", size=10),
-        Layout(name="footer", size=3)
+        Layout(name="header", size=4),
+        Layout(name="main", ratio=1),
+        Layout(name="footer", size=2)
+    )
+    
+    layout["main"].split_row(
+        Layout(name="status", ratio=1),
+        Layout(name="logs", ratio=2)
     )
 
+    def format_bytes(bytes_val):
+        """format bytes in human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_val < 1024:
+                return f"{bytes_val:.1f}{unit}"
+            bytes_val /= 1024
+        return f"{bytes_val:.1f}TB"
+
     def make_layout(status: str, public_url: str = "", error: str = ""):
-        # header
-        header_panel = Panel(
-            f"[bold cyan]TUNNELITE[/bold cyan] - {tunnel_type.upper()} tunnel\n"
-            f"local port: [green]{local_port}[/green]",
-            border_style="cyan"
-        )
-        layout["header"].update(header_panel)
+        # header - tmux style status bar
+        uptime = time.time() - start_time if start_time else 0
+        uptime_str = f"{int(uptime//3600):02d}:{int((uptime%3600)//60):02d}:{int(uptime%60):02d}"
         
-        # body
+        header_text = (
+            f"[bold green]●[/bold green] tunnelite "
+            f"[dim]│[/dim] {tunnel_type.upper()} "
+            f"[dim]│[/dim] :{local_port} "
+            f"[dim]│[/dim] {uptime_str} "
+            f"[dim]│[/dim] {request_count} reqs "
+            f"[dim]│[/dim] ↓{format_bytes(bytes_in)} ↑{format_bytes(bytes_out)}"
+        )
+        
         if error:
-            body_panel = Panel(f"[red] {error}[/red]", border_style="red", title="error")
+            header_text = f"[bold red]●[/bold red] error [dim]│[/dim] {error}"
+        elif status != "active":
+            header_text = f"[bold yellow]●[/bold yellow] {status}"
+            
+        layout["header"].update(Panel(header_text, border_style="bright_black"))
+        
+        # status pane
+        if error:
+            status_content = f"[red]✗ {error}[/red]"
         elif status == "pinging nodes":
-            body_panel = Panel("[yellow] testing connection to all nodes...[/yellow]", border_style="yellow", title="status")
+            status_content = "[yellow]⟳ testing node latency...[/yellow]"
         elif status == "creating":
-            body_panel = Panel("[yellow] creating tunnel...[/yellow]", border_style="yellow", title="status")
+            status_content = "[yellow]⟳ creating tunnel...[/yellow]"
         elif status == "connecting":
-            body_panel = Panel(
-                f"[yellow] connecting to node...[/yellow]\n"
-                f"public url: [blue]{public_url}[/blue]",
-                border_style="yellow", title="status"
-            )
+            status_content = f"[yellow]⟳ connecting to node...[/yellow]\n[blue]{public_url}[/blue]"
         elif status == "active":
-            uptime = time.time() - start_time
-            uptime_str = f"{int(uptime//60)}m {int(uptime%60)}s"
-            body_panel = Panel(
-                f"[green] tunnel active![/green]\n"
-                f"public url: [blue]{public_url}[/blue]\n"
-                f"forwarding: localhost:{local_port}\n"
-                f"uptime: {uptime_str} | requests: {request_count}\n"
-                f"[dim]node selected based on ping latency + load[/dim]",
-                border_style="green", title="tunnel active"
+            status_content = (
+                f"[green]✓ tunnel active[/green]\n\n"
+                f"[bold]public url:[/bold]\n[blue]{public_url}[/blue]\n\n"
+                f"[bold]forwarding:[/bold]\n{public_url} → localhost:{local_port}\n\n"
+                f"[bold]stats:[/bold]\n"
+                f"requests: [cyan]{request_count}[/cyan]\n"
+                f"data in:  [green]{format_bytes(bytes_in)}[/green]\n"
+                f"data out: [red]{format_bytes(bytes_out)}[/red]\n"
+                f"uptime:   [yellow]{uptime_str}[/yellow]"
             )
         else:
-            body_panel = Panel(f"status: {status}", title="status")
+            status_content = f"status: {status}"
             
-        layout["body"].update(body_panel)
+        layout["status"].update(Panel(status_content, title="[bold]status[/bold]", border_style="bright_black"))
+        
+        # logs pane - combine network events and requests
+        combined_log = []
+        
+        # add recent network events
+        recent_network_events = network_events[-8:] if network_events else []
+        for event in recent_network_events:
+            combined_log.append(format_network_event(event))
+        
+        # add recent requests
+        if request_log:
+            combined_log.extend(request_log[-7:])
+        
+        log_content = "\n".join(combined_log) if combined_log else "[dim]waiting for activity...[/dim]"
+        layout["logs"].update(Panel(log_content, title="[bold]network activity[/bold]", border_style="bright_black"))
         
         # footer
-        footer_panel = Panel("[dim]press ctrl+c to stop tunnel[/dim]", border_style="dim")
-        layout["footer"].update(footer_panel)
+        footer_text = "[dim]press [bold]ctrl+c[/bold] to stop tunnel[/dim]"
+        layout["footer"].update(Panel(footer_text, border_style="bright_black"))
         
         return layout
 
-    with Live(make_layout("creating"), refresh_per_second=2) as live:
+    def log_request(method: str, path: str, status_code: int, size: int, direction: str):
+        """add request to log with tmux-style formatting"""
+        timestamp = time.strftime("%H:%M:%S")
+        
+        # color code by status
+        if status_code < 300:
+            status_color = "green"
+        elif status_code < 400:
+            status_color = "yellow"
+        else:
+            status_color = "red"
+            
+        # direction arrow
+        arrow = "→" if direction == "out" else "←"
+        
+        log_entry = f"[dim]{timestamp}[/dim] {arrow} [{status_color}]{status_code}[/{status_color}] {method} {path} [dim]({format_bytes(size)})[/dim]"
+        request_log.append(log_entry)
+
+    with Live(make_layout("creating"), refresh_per_second=4) as live:
         try:
             # 1. ping all nodes to get latency data
             live.update(make_layout("pinging nodes"))
+            add_network_event("tunnel", "pinging nodes for optimal selection")
             ping_data = await ping_all_nodes(api_key)
             
             # 2. create tunnel with ping data
             live.update(make_layout("creating"))
+            add_network_event("tunnel", f"creating {tunnel_type} tunnel on port {local_port}")
             create_payload = {
                 "tunnel_type": tunnel_type, 
                 "local_port": local_port,
@@ -323,11 +435,12 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
             res = requests.post(f"{main_server_url}/tunnels", headers=headers, json=create_payload)
             res.raise_for_status()
             tunnel = res.json()
-            
+            add_network_event("tunnel", f"tunnel created: {tunnel['public_url']}")
+
             tunnel_id = tunnel["tunnel_id"]
             public_url = tunnel["public_url"]
             public_hostname = tunnel["public_hostname"]
-            
+
             # 3. get node details for the server-selected node
             live.update(make_layout("connecting", public_url))
             node_res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
@@ -340,49 +453,85 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                 return
             
             # use the hostname for the connection, not the ip, for proper ssl verification.
-            # the port is taken from the public_address.
             hostname_for_ws = target_node["public_hostname"]
             port_for_ws = urlparse(target_node["public_address"]).port
             
             node_ws_url = f"wss://{hostname_for_ws}:{port_for_ws}"
             connect_uri = f"{node_ws_url}/ws/connect"
-            
+
             # 4. connect and run tunnel
+            add_network_event("connection", f"connecting to {hostname_for_ws}")
             async with websockets.connect(connect_uri) as websocket:
+                add_network_event("connection", "websocket connected")
                 await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
-                
+
                 activation_response_str = await websocket.recv()
                 activation_response = json.loads(activation_response_str)
                 if activation_response.get("status") != "success":
+                    add_network_event("error", f"activation failed: {activation_response}")
                     live.update(make_layout("", "", f"activation failed: {activation_response}"))
                     await asyncio.sleep(3)
                     return
-                
+
+                add_network_event("tunnel", "tunnel activated successfully")
                 live.update(make_layout("active", public_url))
                 start_time = time.time()
                 
-                # proxy loop with live updates
+                # proxy loop with live updates and request logging
                 if tunnel_type in ["http", "https"]:
                     while True:
                         request_from_node = await websocket.recv()
                         request_data_bytes = request_from_node if isinstance(request_from_node, bytes) else request_from_node.encode('utf-8')
+                        
+                        # parse request for logging
+                        try:
+                            request_str = request_data_bytes.decode('utf-8')
+                            lines = request_str.split('\n')
+                            if lines:
+                                method, path = lines[0].split()[:2]
+                        except:
+                            method, path = "?", "/"
+                        
+                        # log incoming request
+                        add_network_event("request", f"{method} {path}", {"method": method, "path": path})
+                        
                         response_to_node = await handle_http_request(local_port, request_data_bytes)
+                        
+                        # parse response status for logging
+                        try:
+                            response_str = response_to_node.decode('utf-8')
+                            status_line = response_str.split('\n')[0]
+                            status_code = int(status_line.split()[1])
+                        except:
+                            status_code = 200
+                        
+                        # log outgoing response
+                        add_network_event("response", f"HTTP {status_code}", {"status_code": status_code})
+                        
                         await websocket.send(response_to_node)
                         
+                        # update stats and log
                         request_count += 1
+                        bytes_in += len(request_data_bytes)
+                        bytes_out += len(response_to_node)
+                        
+                        log_request(method, path, status_code, len(response_to_node), "out")
                         live.update(make_layout("active", public_url))
                         
                 elif tunnel_type in ["tcp", "udp"]:
                     await handle_tcp_stream(local_port, websocket)
-                    
+
         except requests.RequestException as e:
             error_msg = e.response.text if e.response else str(e)
+            add_network_event("error", f"api error: {error_msg}")
             live.update(make_layout("", "", f"api error: {error_msg}"))
             await asyncio.sleep(3)
         except (ConnectionRefusedError, websockets.exceptions.InvalidURI):
+            add_network_event("error", f"could not connect to node at {connect_uri}")
             live.update(make_layout("", "", f"could not connect to node at {connect_uri}"))
             await asyncio.sleep(3)
         except websockets.exceptions.ConnectionClosed as e:
+            add_network_event("connection", f"connection closed: {e.reason} (code: {e.code})")
             live.update(make_layout("", "", f"connection closed: {e.reason} (code: {e.code})"))
             await asyncio.sleep(3)
 
