@@ -113,11 +113,14 @@ async def run_interactive_registration(node_secret_id: str):
     # before registering, we must send a heartbeat so the server knows our address
     print("info:     sending initial heartbeat...")
     try:
-        requests.post(
+        heartbeat_response = requests.post(
             f"{MAIN_SERVER_URL}/nodes/register",
             json={"node_secret_id": node_secret_id, "public_address": NODE_PUBLIC_ADDRESS},
             timeout=10, verify=True
         )
+        print(f"info:     initial registration successful. {heartbeat_response.json().get('message', '')}")
+        # give the database a moment to ensure the write is complete
+        time.sleep(1)
     except requests.RequestException as e:
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
@@ -126,7 +129,8 @@ async def run_interactive_registration(node_secret_id: str):
     print(f"connecting to {ws_uri}...")
 
     try:
-        async with websockets.connect(ws_uri, ssl=True) as websocket:
+        # increase timeout for websocket connection
+        async with websockets.connect(ws_uri, ssl=True, open_timeout=30, close_timeout=10) as websocket:
             print(f"authenticating with node secret id: {node_secret_id}")
             await websocket.send(json.dumps({
                 "node_secret_id": node_secret_id,
@@ -134,7 +138,14 @@ async def run_interactive_registration(node_secret_id: str):
             }))
 
             while True:
-                message_str = await websocket.recv()
+                try:
+                    print("debug:    waiting for message from server...")
+                    message_str = await asyncio.wait_for(websocket.recv(), timeout=30.0)
+                    print(f"debug:    received message: {message_str}")
+                except asyncio.TimeoutError:
+                    print("error:    timeout waiting for server message")
+                    return False
+                    
                 try:
                     message = json.loads(message_str)
                     if not isinstance(message, dict):
@@ -145,6 +156,7 @@ async def run_interactive_registration(node_secret_id: str):
                     continue
 
                 msg_type = message.get("type")
+                print(f"debug:    message type: {msg_type}")
 
                 if msg_type == "reverse_benchmark":
                     benchmark_results = run_reverse_benchmark()
