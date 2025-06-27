@@ -369,7 +369,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # for tcp tunnels, we need to start a dedicated listener on the assigned port
         if tunnel_type in ["tcp", "udp"]:
             try:
-                port = int(public_url.split(":")[1])
+                # extract port from url like "tcp://hostname:8201"
+                port = int(public_url.split(":")[-1])  # get the last part after splitting on ":"
+                print(f"info:     extracted port {port} from public_url: {public_url}")
                 # start the listener as a background task
                 tcp_task = asyncio.create_task(start_tcp_listener(tunnel_id, port))
                 # store the task so we can cancel it later if the client disconnects
