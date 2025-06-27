@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import ssl
 import sys
 import pwd
 import grp
@@ -26,8 +27,8 @@ KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb
 
-# main server url is configured via environment variable
-# it defaults to the standard, public-facing https port (443).
+# --- url configuration and normalization ---
+# read the raw url from the environment, defaulting to the production url
 RAW_MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
 NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
@@ -37,11 +38,16 @@ def get_public_url(base_url: str) -> str:
     parses a url and ensures it points to the standard public port (443 for https).
     this prevents errors when an internal port is accidentally included in the env var.
     """
-    parsed = urlparse(base_url)
-    if parsed.scheme == "https":
-        # rebuild the url without a port, implying the default port 443
-        return urlunparse((parsed.scheme, parsed.hostname, parsed.path, parsed.params, parsed.query, parsed.fragment))
-    return base_url
+    try:
+        parsed = urlparse(base_url)
+        # if scheme is https, we rebuild the url without a port, implying default port 443
+        if parsed.scheme == "https":
+            return urlunparse((parsed.scheme, parsed.hostname or '', parsed.path, '', '', ''))
+        # for http (local dev), keep the port
+        return base_url
+    except Exception:
+        # fallback to the raw url if parsing fails
+        return base_url
 
 MAIN_SERVER_URL = get_public_url(RAW_MAIN_SERVER_URL)
 
@@ -62,7 +68,6 @@ def get_node_secret_id():
 def run_reverse_benchmark():
     """
     performs a speed test by connecting *out* to the main server.
-    this avoids firewall issues on the node.
     """
     print("info:     performing reverse benchmark...")
     try:
@@ -71,8 +76,7 @@ def run_reverse_benchmark():
         start_time = time.monotonic()
         with requests.get(down_url, stream=True, timeout=20, verify=True) as r:
             r.raise_for_status()
-            for _ in r.iter_content(chunk_size=8192):
-                pass
+            for _ in r.iter_content(chunk_size=8192): pass
         down_duration = time.monotonic() - start_time
         down_mbps = (BENCHMARK_PAYLOAD_SIZE / down_duration) * 8 / (1024*1024)
         print(f"info:     download speed: {down_mbps:.2f} mbps")
@@ -222,8 +226,7 @@ if __name__ == "__main__":
         res = requests.get(
             f"{MAIN_SERVER_URL}/nodes/me",
             headers={"x-node-secret-id": node_secret_id},
-            timeout=10,
-            verify=True
+            timeout=10, verify=True
         )
         if res.status_code == 200:
             if res.json().get("status") == "approved":
