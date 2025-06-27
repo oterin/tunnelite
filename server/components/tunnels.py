@@ -61,7 +61,7 @@ def get_available_tcp_port(node: dict) -> Optional[int]:
     # no free ports found, rip in pieces.
     return None
 
-def find_best_node(tunnel_type: str, preferred_country: str) -> Optional[tuple]:
+def find_best_node(tunnel_type: str, preferred_country: str, ping_data: Optional[dict] = None) -> Optional[tuple]:
     all_nodes = database.get_active_nodes()
 
     # filter out nodes that are under high system load
@@ -99,7 +99,27 @@ def find_best_node(tunnel_type: str, preferred_country: str) -> Optional[tuple]:
             cpu_for_score = node_metrics.get("system", {}).get("cpu_percent", 0)
         else:
             cpu_for_score = node_metrics.get("cpu_percent", 0)
-        node["score"] = (node["current_load"] * 0.5) + (cpu_for_score * 0.5)
+        
+        # incorporate ping data if available
+        ping_score = 0
+        if ping_data and node.get("public_hostname"):
+            hostname = node["public_hostname"]
+            if hostname in ping_data:
+                # convert ping latency to score (lower latency = better score)
+                latency_ms = ping_data[hostname]
+                ping_score = min(latency_ms / 10, 50)  # cap at 50 for very high latency
+        
+        # weighted scoring: load (40%) + cpu (30%) + ping (30%)
+        node["score"] = (node["current_load"] * 0.4) + (cpu_for_score * 0.3) + (ping_score * 0.3)
+        
+        # add debug info for node selection
+        node["selection_debug"] = {
+            "load_score": node["current_load"] * 0.4,
+            "cpu_score": cpu_for_score * 0.3,
+            "ping_score": ping_score * 0.3,
+            "total_score": node["score"],
+            "ping_ms": ping_data.get(node.get("public_hostname")) if ping_data else None
+        }
 
     # sort nodes by score to always check the least busy ones first
     eligible_nodes.sort(key=lambda x: x["score"])
@@ -151,7 +171,7 @@ async def create_tunnel(
 
     # 1. find the best node for the user
     preferred_country = get_country_code_from_ip(request.client.host) # type: ignore
-    result  = find_best_node(tunnel_request.tunnel_type, preferred_country)
+    result  = find_best_node(tunnel_request.tunnel_type, preferred_country, tunnel_request.ping_data)
 
     if not result:
         raise HTTPException(

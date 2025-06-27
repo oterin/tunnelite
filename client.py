@@ -2,6 +2,9 @@ import asyncio
 import getpass
 import json
 import os
+import re
+import subprocess
+import platform
 import sys
 import time
 from typing import Optional, List, Dict
@@ -42,6 +45,86 @@ app = typer.Typer(
 )
 
 # --- helper functions ---
+async def ping_node(hostname: str) -> Optional[float]:
+    """pings a node and returns latency in milliseconds, or None if unreachable"""
+    try:
+        # determine ping command based on platform
+        if platform.system().lower() == "windows":
+            cmd = ["ping", "-n", "3", hostname]
+        else:
+            cmd = ["ping", "-c", "3", hostname]
+        
+        # run ping command
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            # parse ping output to extract average latency
+            output = result.stdout.lower()
+            if platform.system().lower() == "windows":
+                # windows format: "average = 123ms"
+                if "average" in output:
+                    avg_line = [line for line in output.split('\n') if 'average' in line]
+                    if avg_line:
+                        # extract number before "ms"
+                        match = re.search(r'(\d+)ms', avg_line[0])
+                        if match:
+                            return float(match.group(1))
+            else:
+                # linux/mac format: "min/avg/max/stddev = 1.234/5.678/9.012/1.234 ms"
+                if "min/avg/max" in output or "rtt min/avg/max" in output:
+                    match = re.search(r'[\d.]+/([\d.]+)/[\d.]+', output)
+                    if match:
+                        return float(match.group(1))
+        
+        return None
+    except Exception as e:
+        console.print(f"[dim]ping failed for {hostname}: {e}[/dim]")
+        return None
+
+async def ping_all_nodes(api_key: str) -> Dict[str, float]:
+    """pings all available nodes and returns latency data"""
+    headers = {"x-api-key": api_key}
+    
+    try:
+        # get available nodes
+        res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
+        res.raise_for_status()
+        nodes = res.json()
+        
+        if not nodes:
+            console.print("[yellow]no nodes available for ping test[/yellow]")
+            return {}
+        
+        console.print(f"[cyan]pinging {len(nodes)} nodes...[/cyan]")
+        
+        # ping all nodes concurrently
+        ping_tasks = []
+        for node in nodes:
+            hostname = node["public_hostname"]
+            # extract hostname from public_address if needed
+            if "://" in node.get("public_address", ""):
+                ping_host = node["public_address"].split("://")[1].split(":")[0]
+            else:
+                ping_host = hostname.split(".")[0] if "." in hostname else hostname
+            
+            ping_tasks.append((hostname, ping_node(ping_host)))
+        
+        # wait for all pings to complete
+        ping_results = {}
+        for hostname, ping_task in ping_tasks:
+            latency = await ping_task
+            if latency is not None:
+                ping_results[hostname] = latency
+                console.print(f"[green]✓[/green] {hostname}: {latency:.1f}ms")
+            else:
+                console.print(f"[red]✗[/red] {hostname}: unreachable")
+        
+        return ping_results
+        
+    except requests.RequestException as e:
+        console.print(f"[red]failed to get node list: {e}[/red]")
+        return {}
+
 def get_api_key() -> Optional[str]:
     """retrieves the api key from the local config file."""
     if not os.path.exists(api_key_file):
@@ -191,6 +274,8 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
         # body
         if error:
             body_panel = Panel(f"[red] {error}[/red]", border_style="red", title="error")
+        elif status == "pinging nodes":
+            body_panel = Panel("[yellow] testing connection to all nodes...[/yellow]", border_style="yellow", title="status")
         elif status == "creating":
             body_panel = Panel("[yellow] creating tunnel...[/yellow]", border_style="yellow", title="status")
         elif status == "connecting":
@@ -206,7 +291,8 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                 f"[green] tunnel active![/green]\n"
                 f"public url: [blue]{public_url}[/blue]\n"
                 f"forwarding: localhost:{local_port}\n"
-                f"uptime: {uptime_str} | requests: {request_count}",
+                f"uptime: {uptime_str} | requests: {request_count}\n"
+                f"[dim]node selected based on ping latency + load[/dim]",
                 border_style="green", title="tunnel active"
             )
         else:
@@ -222,8 +308,17 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
 
     with Live(make_layout("creating"), refresh_per_second=2) as live:
         try:
-            # 1. create tunnel
-            create_payload = {"tunnel_type": tunnel_type, "local_port": local_port}
+            # 1. ping all nodes to get latency data
+            live.update(make_layout("pinging nodes"))
+            ping_data = await ping_all_nodes(api_key)
+            
+            # 2. create tunnel with ping data
+            live.update(make_layout("creating"))
+            create_payload = {
+                "tunnel_type": tunnel_type, 
+                "local_port": local_port,
+                "ping_data": ping_data
+            }
             res = requests.post(f"{main_server_url}/tunnels", headers=headers, json=create_payload)
             res.raise_for_status()
             tunnel = res.json()
@@ -232,7 +327,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
             public_url = tunnel["public_url"]
             public_hostname = tunnel["public_hostname"]
             
-            # 2. get node details
+            # 3. get node details for the server-selected node
             live.update(make_layout("connecting", public_url))
             node_res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
             node_res.raise_for_status()
@@ -246,7 +341,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
             node_ws_url = target_node["public_address"].replace("http", "ws", 1)
             connect_uri = f"{node_ws_url}/ws/connect"
             
-            # 3. connect and run tunnel
+            # 4. connect and run tunnel
             async with websockets.connect(connect_uri) as websocket:
                 await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
                 

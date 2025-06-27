@@ -601,9 +601,9 @@ if __name__ == "__main__":
     background_service_process.start()
     print(f"info:     background service started with pid: {background_service_process.pid}")
 
-    # limit workers to a reasonable number for a tunneling service
-    max_workers = min(4, max(2, cpu_count() // 4))  # 2-4 workers max
-    print(f"info:     spawning {max_workers} worker processes...")
+    # use only 1 worker process to avoid confusion
+    max_workers = 1
+    print(f"info:     spawning {max_workers} worker process...")
     workers = []
     for _ in range(max_workers):
         worker = Process(target=start_worker_process, args=(https_socket,))

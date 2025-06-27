@@ -19,6 +19,7 @@ class Token(BaseModel):
 class TunnelCreate(BaseModel):
     tunnel_type: str = Field(..., description="the type of tunnel (e.g., http, tcp)")
     local_port: int = Field(..., gt=0, lt=65536, description="the local port to expose")
+    ping_data: Optional[dict] = Field(None, description="ping latency data for each node (hostname -> latency_ms)")
 
 class Tunnel(BaseModel):
     public_hostname: str # the public name of the node serving the tunnel
