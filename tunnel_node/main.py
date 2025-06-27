@@ -11,6 +11,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import psutil
 import websockets
+import socket
 
 from . import config
 from .connection_manager import manager
@@ -202,20 +203,52 @@ def run_challenge_server(port, key):
     handler = ChallengeHandler
     handler.challenge_key = key
     try:
+        print(f"info:     attempting to bind challenge listener to 0.0.0.0:{port}")
         server = HTTPServer(('0.0.0.0', port), handler)  # explicitly bind to all interfaces
-        print(f"info:     challenge listener started on 0.0.0.0:{port} with key {key}")
+        print(f"info:     challenge listener successfully bound to 0.0.0.0:{port} with key {key}")
+        print(f"info:     waiting for challenge request on port {port}...")
+        
+        # set a timeout so it doesn't hang forever
+        server.timeout = 10
         server.handle_request()
         print(f"info:     challenge listener on port {port} handled request and finished")
+    except OSError as e:
+        print(f"error:    failed to bind challenge listener to port {port}: {e}")
     except Exception as e:
         print(f"error:    challenge listener on port {port} failed: {e}")
+
+def is_port_available(port):
+    """check if a port is available for binding"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('0.0.0.0', port))
+            return True
+    except OSError:
+        return False
 
 @app.post("/internal/setup-challenge-listener")
 async def setup_challenge_listener(req: ChallengeRequest):
     print(f"info:     setting up challenge listener on port {req.port} with key {req.key}")
-    server_thread = threading.Thread(target=run_challenge_server, args=(req.port, req.key), daemon=True)
+    
+    # check if port is available
+    if not is_port_available(req.port):
+        error_msg = f"port {req.port} is already in use or not available"
+        print(f"error:    {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+    
+    # start the server in a separate thread
+    server_thread = threading.Thread(
+        target=run_challenge_server, 
+        args=(req.port, req.key), 
+        daemon=True,
+        name=f"challenge-listener-{req.port}"
+    )
     server_thread.start()
-    # give the server a moment to start
-    await asyncio.sleep(0.5)
+    
+    # give the server a moment to start and bind
+    await asyncio.sleep(1.0)
+    
+    print(f"info:     challenge listener thread started for port {req.port}")
     return {"message": f"challenge listener setup initiated on port {req.port}"}
 
 @app.post("/internal/run-benchmark")
