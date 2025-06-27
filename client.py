@@ -15,7 +15,7 @@ config_dir = os.path.join(home_dir, ".tunnelite")
 api_key_file = os.path.join(config_dir, "api_key")
 
 # you can override this with an environment variable for different environments.
-main_server_url = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net:8220")
+main_server_url = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 
 # create the main cli application object.
 app = typer.Typer(

@@ -8,7 +8,7 @@ NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
 
 # this is the base url of the main server api.
 # it can be overridden for local development, but defaults to the production url.
-MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net:8220")
+MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 
 # configuration validation
 if not all([NODE_PUBLIC_ADDRESS]):
