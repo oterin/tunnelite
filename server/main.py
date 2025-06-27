@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, WebSocket
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 import time
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -82,7 +82,7 @@ async def test_registration_router():
 
 # debug websocket test
 @app.websocket("/test-ws")
-async def test_websocket(websocket):
+async def test_websocket(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_text("websocket test working")
     await websocket.close()
