@@ -39,7 +39,7 @@ def parse_port_range(range_str: str) -> List[int]:
             ports.update(range(int(start), int(end) + 1))
         else:
             ports.add(int(part))
-            return sorted(list(ports))
+    return sorted(list(ports))
 
 
 # --- reverse benchmark endpoints ---
@@ -116,6 +116,10 @@ async def register_node_websocket(websocket: WebSocket):
         await websocket.send_json({"type": "prompt", "message": "enter public port range for tcp/udp tunnels (e.g., 3000-4000; 5001):"})
         port_range_str = (await websocket.receive_json())["response"]
         ports_to_verify = parse_port_range(port_range_str)
+
+        # validate that we got some ports
+        if not ports_to_verify:
+            raise WebSocketDisconnect(code=1008, reason="invalid or empty port range")
 
         # 4. multi-port verification with concurrent challenges
         if SKIP_PORT_VERIFICATION:
