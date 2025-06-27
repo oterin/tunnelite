@@ -1,7 +1,6 @@
 fastapi
 uvicorn[standard]
 requests
-python-dotenv
 filelock
 random-word
 slowapi

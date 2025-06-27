@@ -1,12 +1,14 @@
 import logging
-import os
+
+# fetch log level from values.json or env
+from server import config
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
 # create a logger instance that can be imported by other modules
 log = logging.getLogger("tunnelite")
 
 # set the log level from an environment variable, defaulting to info
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = config.get("LOG_LEVEL", "INFO").upper()
 log.setLevel(log_level)
 
 # create a handler to output log records to the console (stdout)

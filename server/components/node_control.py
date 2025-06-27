@@ -11,7 +11,7 @@ class NodeConnectionManager:
 
     async def connect(self, node_secret_id: str, websocket: WebSocket):
         """registers a new node connection."""
-        await websocket.accept()
+        # ws already accepted by the caller; just store reference
         self.active_node_connections[node_secret_id] = websocket
         log.info("node control channel connected", extra={"node_secret_id": node_secret_id})
 
@@ -54,6 +54,9 @@ async def node_control_websocket(websocket: WebSocket):
     """
     node_secret_id = None
     try:
+        # accept the connection before reading any messages
+        await websocket.accept()
+        
         # the first message from the node must be an auth message
         auth_message = await websocket.receive_json()
         if auth_message.get("type") != "auth":

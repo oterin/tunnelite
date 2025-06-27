@@ -14,8 +14,11 @@ home_dir = os.path.expanduser("~")
 config_dir = os.path.join(home_dir, ".tunnelite")
 api_key_file = os.path.join(config_dir, "api_key")
 
-# you can override this with an environment variable for different environments.
-main_server_url = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
+# shared config loader
+from server import config
+
+# base url for api
+main_server_url = config.get("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 
 # create the main cli application object.
 app = typer.Typer(
@@ -174,7 +177,7 @@ def login(
     try:
         res = requests.post(
             f"{main_server_url}/auth/token",
-            data={\"username\": username, \"password\": password}
+            data={"username": username, "password": password}
         )
         res.raise_for_status()
         api_key = res.json()["api_key"]

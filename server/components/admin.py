@@ -14,12 +14,14 @@ from fastapi.security import APIKeyHeader
 from server.components import database
 from server.components.models import *
 from pydantic import BaseModel, Field
+from server import config
 
 
 
-ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
+# load config from values.json or env
+ADMIN_API_KEY = config.get("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
-    raise ValueError("tunnelite_admin_key environment variable is not set")
+    raise ValueError("TUNNELITE_ADMIN_KEY not configured")
 
 api_key_header = APIKeyHeader(
     name="X-Admin-Key",

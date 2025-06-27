@@ -2,13 +2,12 @@ import asyncio
 import json
 import websockets
 import requests
-from dotenv import load_dotenv
-import os
 
-load_dotenv(dotenv_path=".env")
+# shared config loader
+from server import config
 
-MAIN_SERVER_URL = os.getenv("MAIN_SERVER_URL", "http://127.0.0.1:8000")
-NODE_API_URL = os.getenv("NODE_PUBLIC_ADDRESS", "http://127.0.0.1:8001")
+MAIN_SERVER_URL = config.get("TUNNELITE_SERVER_URL", "http://127.0.0.1:8000")
+NODE_API_URL = config.get("NODE_PUBLIC_ADDRESS", "http://127.0.0.1:8001")
 
 WS_MAIN_SERVER_URL = MAIN_SERVER_URL.replace("http://", "ws://").replace("https://", "wss://")
 

@@ -13,13 +13,14 @@ from starlette.responses import StreamingResponse
 
 from server.components import database
 from server.logger import log
-import os
+# load config
+from server import config
 
 router = APIRouter(prefix="/registration", tags=["node registration"])
 
-ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
+ADMIN_API_KEY = config.get("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
-    raise ValueError("TUNNELITE_ADMIN_KEY environment variable not set")
+    raise ValueError("TUNNELITE_ADMIN_KEY not configured")
 
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 

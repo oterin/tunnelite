@@ -18,20 +18,18 @@ import websockets
 # these imports are now relative to the project root
 from tunnel_node.main import app as fastapi_app
 
-# --- configuration ---
-DROP_TO_USER = "tunnelite"
-DROP_TO_GROUP = "tunnelite"
-HTTPS_PORT = 443
-CERT_FILE = "ssl/cert.pem"
-KEY_FILE = "ssl/key.pem"
-SECRET_ID_FILE = "node_secret_id.txt"
-BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
-
 # --- url configuration and normalization ---
-# read the raw url from the environment, defaulting to the production url
-RAW_MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
-ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
-NODE_PUBLIC_ADDRESS = os.getenv("NODE_PUBLIC_ADDRESS")
+# shared config helper
+from server import config as common_config
+
+# read the main server url from config
+RAW_MAIN_SERVER_URL = common_config.get("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
+
+# admin key for registration
+ADMIN_API_KEY = common_config.get("TUNNELITE_ADMIN_KEY")
+
+# read the node public address from config
+NODE_PUBLIC_ADDRESS = common_config.get("NODE_PUBLIC_ADDRESS")
 
 def get_public_url(base_url: str) -> str:
     """
@@ -101,7 +99,7 @@ def run_reverse_benchmark():
 async def run_interactive_registration(node_secret_id: str):
     """the main interactive registration coroutine."""
     if not NODE_PUBLIC_ADDRESS:
-        sys.exit("error: NODE_PUBLIC_ADDRESS not found in environment for registration.")
+        sys.exit("error: NODE_PUBLIC_ADDRESS not configured in values.json for registration.")
 
     # before registering, we must send a heartbeat so the server knows our address
     print("info:     sending initial heartbeat...")
@@ -252,7 +250,7 @@ if __name__ == "__main__":
 
     if not is_registered_and_approved:
         if not ADMIN_API_KEY:
-            sys.exit("error: TUNNELITE_ADMIN_KEY must be set in environment to register a new node.")
+            sys.exit("error: admin key missing in values.json")
 
         temp_server_process = Process(target=run_temp_api_server)
         temp_server_process.start()

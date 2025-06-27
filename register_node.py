@@ -1,17 +1,15 @@
 import asyncio
 import json
-import os
 import websockets
 import requests
-from dotenv import load_dotenv
 
-# load .env file from the current directory for the admin key
-load_dotenv()
+# shared config
+from server import config
 
 # --- configuration ---
-MAIN_SERVER_URL = os.getenv("TUNNELITE_SERVER_URL", "http://127.0.0.1:8000")
-ADMIN_API_KEY = os.getenv("TUNNELITE_ADMIN_KEY")
-NODE_API_URL = os.getenv("NODE_PUBLIC_ADDRESS", "http://127.0.0.1:8001")
+MAIN_SERVER_URL = config.get("TUNNELITE_SERVER_URL", "http://127.0.0.1:8000")
+ADMIN_API_KEY = config.get("TUNNELITE_ADMIN_KEY")
+NODE_API_URL = config.get("NODE_PUBLIC_ADDRESS", "http://127.0.0.1:8001")
 SECRET_ID_FILE = "node_secret_id.txt"
 
 # convert http url to websocket url

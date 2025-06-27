@@ -1,5 +1,4 @@
 import asyncio
-import os
 from fastapi import FastAPI
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 
@@ -20,6 +19,7 @@ from server.components import (
     node_control,
 )
 from server import garbage_collector
+from server import config
 
 # --- app initialization ---
 
@@ -38,7 +38,7 @@ app.add_middleware(SlowAPIMiddleware)
 # note: this is only useful if you also listen on port 80.
 # if your server only listens on 443, this middleware is not strictly necessary
 # but adds a layer of defense.
-if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
+if config.get("ENFORCE_HTTPS", "false").lower() == "true":
     app.add_middleware(HTTPSRedirectMiddleware)
 
 

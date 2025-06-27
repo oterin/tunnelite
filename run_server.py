@@ -1,9 +1,11 @@
-import os
+# config loader replaces env vars
 import sys
 import uvicorn
+import os
 
 # these imports are now relative to the project root
 from server.main import app as fastapi_app
+from server import config
 
 # --- configuration ---
 # the host to bind to. '0.0.0.0' makes it accessible from outside.
@@ -21,8 +23,8 @@ if __name__ == "__main__":
     # --- pre-flight checks ---
 
     # 1. ensure the admin key is set, as it's critical for security.
-    if not os.getenv("TUNNELITE_ADMIN_KEY"):
-        sys.exit("error: critical environment variable TUNNELITE_ADMIN_KEY is not set.")
+    if not config.get("TUNNELITE_ADMIN_KEY"):
+        sys.exit("error: critical admin key missing in values.json")
 
     # 2. ensure ssl certificates exist before attempting to start the server.
     if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):

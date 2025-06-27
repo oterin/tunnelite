@@ -1,6 +1,5 @@
 fastapi[all]
 passlib[bcrypt]
-python-dotenv
 requests
 websockets
 random-word
