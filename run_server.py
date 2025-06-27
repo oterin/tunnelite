@@ -9,7 +9,7 @@ from server.main import app as fastapi_app
 # the host to bind to. '0.0.0.0' makes it accessible from outside.
 HOST = "0.0.0.0"
 # the custom port the api server will listen on for secure traffic.
-PORT = 8220
+PORT = 443
 # paths to the ssl certificate files for the main api domain (e.g., api.tunnelite.net)
 CERT_FILE = "ssl/api_cert.pem"
 KEY_FILE = "ssl/api_key.pem"
