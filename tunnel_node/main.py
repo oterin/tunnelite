@@ -100,6 +100,9 @@ async def heartbeat_task():
             print(f"error:    heartbeat failed: {e}")
 
 async def node_control_channel_task():
+    retry_count = 0
+    max_retries = 5
+    
     while True:
         try:
             node_cert = get_node_cert()
@@ -107,18 +110,22 @@ async def node_control_channel_task():
             
             # use jwt endpoint if we have a cert
             if node_cert:
+                # truncate token for logging (show first 20 chars)
+                token_preview = node_cert[:20] + "..." if len(node_cert) > 20 else node_cert
                 control_uri = f"{ws_url}/ws/node-control-jwt?token={node_cert}"
+                print(f"info:     connecting to JWT control channel with token {token_preview} (attempt {retry_count + 1})")
             else:
                 control_uri = f"{ws_url}/ws/node-control"
+                print(f"info:     connecting to legacy control channel (attempt {retry_count + 1})")
                 
-            print(f"info:     connecting to server control channel at {control_uri}...")
-            async with websockets.connect(control_uri) as websocket:
+            async with websockets.connect(control_uri, ssl=True) as websocket:
                 # only send auth message for legacy endpoint
                 if not node_cert:
                     auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
                     await websocket.send(json.dumps(auth_payload))
                     
-                print("info:     node control channel connected and authenticated.")
+                print("info:     node control channel connected successfully.")
+                retry_count = 0  # reset retry count on successful connection
 
                 # 2. listen for commands from the server
                 async for message in websocket:
@@ -134,21 +141,35 @@ async def node_control_channel_task():
                         print(f"error:    error processing command from server: {e}")
 
         except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError) as e:
-            print(f"warn:     control channel connection lost: {e}. reconnecting in 20 seconds.")
-            await asyncio.sleep(20)
-        except Exception as e:
-            print(f"error:    an unexpected error occurred in the control channel task: {e}. reconnecting in 60 seconds.")
+            retry_count += 1
+            if retry_count <= max_retries:
+                backoff_time = min(10 * retry_count, 60)  # exponential backoff, max 60s
+                print(f"warn:     control channel connection failed: {e}. retrying in {backoff_time}s... (attempt {retry_count}/{max_retries})")
+                await asyncio.sleep(backoff_time)
+            else:
+                print(f"warn:     control channel failed after {max_retries} attempts. giving up for 5 minutes.")
+                await asyncio.sleep(300)  # 5 minutes
+                retry_count = 0
+        except websockets.exceptions.InvalidHandshake as e:
+            print(f"error:    control channel handshake failed: {e}. this may be a JWT issue. waiting 60 seconds.")
             await asyncio.sleep(60)
+        except Exception as e:
+            retry_count += 1
+            print(f"error:    unexpected error in control channel (attempt {retry_count}): {e}. waiting 30 seconds.")
+            await asyncio.sleep(30)
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     # perform initial registration immediately
     register_with_main_server()
 
     # start background tasks
     print("info:     starting background tasks (heartbeat, control channel)...")
     asyncio.create_task(heartbeat_task())
+    
+    # wait a moment before starting control channel to let registration settle
+    await asyncio.sleep(5)
     asyncio.create_task(node_control_channel_task())
 
 def register_with_main_server():
