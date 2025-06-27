@@ -1,6 +1,8 @@
 import asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
+import time
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # import rate limiting components
 from server.ratelimit import limiter
@@ -21,6 +23,19 @@ from server.components import (
 from server import garbage_collector
 from server import config
 
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        print(f"Request: {request.method} {request.url} headers={dict(request.headers)}")
+        
+        if request.url.path.startswith("/ws") or "upgrade" in str(request.headers).lower():
+            print(f"WebSocket request detected: {request.url}")
+        
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        print(f"Response: {response.status_code} in {process_time:.4f}s")
+        return response
+
 # --- app initialization ---
 
 app = FastAPI(
@@ -28,6 +43,9 @@ app = FastAPI(
     description="the central api server for the tunnelite service.",
     version="0.1.0",
 )
+
+# add logging middleware first
+app.add_middleware(LoggingMiddleware)
 
 # note: rate limiting middleware disabled because it blocks websockets with 403
 

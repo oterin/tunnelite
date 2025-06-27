@@ -38,6 +38,9 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
         log_level="info",
+        access_log=True,
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
         ssl_keyfile=KEY_FILE,
         ssl_certfile=CERT_FILE,
     )
