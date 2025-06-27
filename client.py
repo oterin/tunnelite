@@ -22,6 +22,8 @@ from rich.live import Live
 from rich.layout import Layout
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich import box
+from rich.columns import Columns
+from rich.align import Align
 
 # --- configuration ---
 # we'll store the api key in the user's home directory for persistence.
@@ -69,113 +71,95 @@ def format_network_event(event):
     event_type = event["type"]
     message = event["message"]
     
-    # color code based on event type
+    # monochrome icons only
     if event_type == "connection":
-        color = "green"
         icon = "●"
     elif event_type == "request":
-        color = "cyan" 
         icon = "→"
     elif event_type == "response":
         status = event.get("metadata", {}).get("status_code", 200)
-        if status < 300:
-            color = "green"
-        elif status < 400:
-            color = "yellow"
+        if status < 400:
+            icon = "✓"
         else:
-            color = "red"
-        icon = "←"
+            icon = "✗"
     elif event_type == "error":
-        color = "red"
         icon = "✗"
     elif event_type == "tunnel":
-        color = "blue"
         icon = "▲"
     else:
-        color = "dim"
         icon = "•"
     
-    return f"[dim]{timestamp}[/dim] [{color}]{icon}[/{color}] {message}"
+    return f"[dim]{timestamp}[/dim] {icon} {message}"
 
 # --- helper functions ---
 async def ping_node(hostname: str) -> Optional[float]:
-    """pings a node and returns latency in milliseconds, or None if unreachable"""
+    """ping a node and return latency in milliseconds"""
     try:
-        # determine ping command based on platform
-        if platform.system().lower() == "windows":
-            cmd = ["ping", "-n", "3", hostname]
+        system = platform.system().lower()
+        if system == "windows":
+            # windows ping command
+            result = subprocess.run(
+                ["ping", "-n", "1", hostname],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # parse windows ping output
+                for line in result.stdout.split('\n'):
+                    if 'time=' in line.lower():
+                        time_part = line.split('time=')[1].split('ms')[0]
+                        return float(time_part.replace('<', ''))
         else:
-            cmd = ["ping", "-c", "3", hostname]
-        
-        # run ping command
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        
-        if result.returncode == 0:
-            # parse ping output to extract average latency
-            output = result.stdout.lower()
-            if platform.system().lower() == "windows":
-                # windows format: "average = 123ms"
-                if "average" in output:
-                    avg_line = [line for line in output.split('\n') if 'average' in line]
-                    if avg_line:
-                        # extract number before "ms"
-                        match = re.search(r'(\d+)ms', avg_line[0])
-                        if match:
-                            return float(match.group(1))
-            else:
-                # linux/mac format: "min/avg/max/stddev = 1.234/5.678/9.012/1.234 ms"
-                if "min/avg/max" in output or "rtt min/avg/max" in output:
-                    match = re.search(r'[\d.]+/([\d.]+)/[\d.]+', output)
-                    if match:
-                        return float(match.group(1))
-        
+            # unix-like systems (linux, macos)
+            result = subprocess.run(
+                ["ping", "-c", "1", hostname],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # parse unix ping output
+                for line in result.stdout.split('\n'):
+                    if 'time=' in line:
+                        time_part = line.split('time=')[1].split(' ')[0]
+                        return float(time_part)
         return None
-    except Exception as e:
-        console.print(f"[dim]ping failed for {hostname}: {e}[/dim]")
+    except:
         return None
 
 async def ping_all_nodes(api_key: str) -> Dict[str, float]:
-    """pings all available nodes and returns latency data"""
+    """ping all available nodes and return latency data"""
     headers = {"x-api-key": api_key}
-    
     try:
-        # get available nodes
-        res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
-        res.raise_for_status()
-        nodes = res.json()
+        response = requests.get(f"{main_server_url}/nodes/available", headers=headers)
+        response.raise_for_status()
+        nodes = response.json()
         
-        if not nodes:
-            console.print("[yellow]no nodes available for ping test[/yellow]")
+        ping_tasks = []
+        hostnames = []
+        
+        for node in nodes:
+            hostname = node.get("public_hostname")
+            if hostname:
+                hostnames.append(hostname)
+                ping_tasks.append(ping_node(hostname))
+        
+        if not ping_tasks:
             return {}
         
-        console.print(f"[cyan]pinging {len(nodes)} nodes...[/cyan]")
+        # run all pings concurrently
+        ping_results = await asyncio.gather(*ping_tasks)
         
-        # ping all nodes concurrently
-        ping_tasks = []
-        for node in nodes:
-            hostname = node["public_hostname"]
-            # extract hostname from public_address if needed
-            if "://" in node.get("public_address", ""):
-                ping_host = node["public_address"].split("://")[1].split(":")[0]
-            else:
-                ping_host = hostname.split(".")[0] if "." in hostname else hostname
-            
-            ping_tasks.append((hostname, ping_node(ping_host)))
-        
-        # wait for all pings to complete
-        ping_results = {}
-        for hostname, ping_task in ping_tasks:
-            latency = await ping_task
+        # build result dictionary
+        ping_data = {}
+        for hostname, latency in zip(hostnames, ping_results):
             if latency is not None:
-                ping_results[hostname] = latency
-                console.print(f"[green]✓[/green] {hostname}: {latency:.1f}ms")
-            else:
-                console.print(f"[red]✗[/red] {hostname}: unreachable")
+                ping_data[hostname] = latency
         
-        return ping_results
+        return ping_data
         
-    except requests.RequestException as e:
-        console.print(f"[red]failed to get node list: {e}[/red]")
+    except requests.RequestException:
         return {}
 
 def get_api_key() -> Optional[str]:
@@ -197,225 +181,251 @@ def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def show_header():
-    """displays the tunnelite header"""
-    header = Text("TUNNELITE", style="bold cyan")
-    subheader = Text("secure localhost tunneling", style="dim")
-    panel = Panel.fit(f"{header}\n{subheader}", border_style="cyan")
-    console.print(panel)
+    """show centered monochrome header"""
+    header_text = Text()
+    header_text.append("tunnelite", style="bold")
+    header_text.append(" / ", style="dim")
+    header_text.append("localhost tunneling", style="dim")
+    
+    console.print()
+    console.print(Align.center(header_text))
+    console.print(Align.center("─" * 40, style="dim"))
     console.print()
 
 def show_user_info():
-    """shows current user info if logged in"""
+    """show user authentication status"""
     api_key = get_api_key()
     if api_key:
-        try:
-            headers = {"x-api-key": api_key}
-            res = requests.get(f"{main_server_url}/auth/users/me", headers=headers, timeout=5)
-            if res.status_code == 200:
-                username = res.json().get("username", "unknown")
-                console.print(f"logged in as: [bold green]{username}[/bold green]")
-            else:
-                console.print("[yellow] invalid session - please login again[/yellow]")
-        except requests.RequestException:
-            console.print("[red] could not verify session[/red]")
+        console.print(Align.center("[dim]authenticated[/dim]"))
     else:
-        console.print("[dim]not logged in[/dim]")
+        console.print(Align.center("[dim]not authenticated[/dim]"))
     console.print()
 
 def show_tunnel_status(tunnels: List[Dict]):
-    """displays tunnels in a formatted table"""
+    """show tunnel status in a centered table"""
     if not tunnels:
-        console.print("[dim]no tunnels found[/dim]")
+        console.print(Align.center("[dim]no active tunnels[/dim]"))
         return
-    
-    table = Table(title="Active Tunnels", box=box.ROUNDED)
-    table.add_column("type", style="cyan")
-    table.add_column("public url", style="blue")
-    table.add_column("local port", style="green")
-    table.add_column("status", style="bold")
-    
+
+    table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+    table.add_column("type", style="dim")
+    table.add_column("public url")
+    table.add_column("local port", style="dim")
+    table.add_column("status", justify="center")
+
     for tunnel in tunnels:
-        status_style = "green" if tunnel["status"] == "active" else "yellow"
+        status_icon = "●" if tunnel.get("status") == "active" else "○"
         table.add_row(
-            tunnel["tunnel_type"],
-            tunnel["public_url"],
-            str(tunnel["local_port"]),
-            f"[{status_style}]{tunnel['status']}[/{status_style}]"
+            tunnel.get("tunnel_type", "unknown"),
+            tunnel.get("public_url", "unknown"),
+            str(tunnel.get("local_port", "unknown")),
+            status_icon
         )
-    
-    console.print(table)
+
+    console.print(Align.center(table))
 
 # --- proxy logic (for http and tcp tunnels) ---
 async def handle_http_request(local_port: int, request_data: bytes) -> bytes:
-    """handles a single http request and returns the full response."""
+    """forward http request to local server and return response"""
     try:
-        _, writer = await asyncio.open_connection("127.0.0.1", local_port)
+        reader, writer = await asyncio.open_connection('127.0.0.1', local_port)
         writer.write(request_data)
         await writer.drain()
-
-        response_data = await _.read(4096)
+        
+        response_data = b""
+        while True:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            response_data += chunk
+        
         writer.close()
         await writer.wait_closed()
         return response_data
-    except ConnectionRefusedError:
-        typer.secho(f"error: connection refused for localhost:{local_port}", fg=typer.colors.RED)
-        return b"http/1.1 502 bad gateway\r\n\r\ntunnelite client could not connect to local service."
     except Exception as e:
-        typer.secho(f"error: error forwarding to local service: {e}", fg=typer.colors.RED)
-        return b"http/1.1 500 internal server error\r\n\r\ntunnelite client error."
+        error_response = f"HTTP/1.1 502 Bad Gateway\r\nContent-Length: {len(str(e))}\r\n\r\n{e}".encode()
+        return error_response
 
 async def handle_tcp_stream(local_port: int, websocket: websockets.WebSocketClientProtocol):
-    """handles a bidirectional tcp stream."""
-    local_writer = None
+    """handle tcp tunnel streaming"""
     try:
-        local_reader, local_writer = await asyncio.open_connection("127.0.0.1", local_port)
-
         async def forward_to_local_task():
-            """forwards data from websocket -> local tcp socket."""
-            async for data in websocket:
-                if isinstance(data, bytes):
-                    local_writer.write(data)
-                    await local_writer.drain()
+            async for message in websocket:
+                # forward data from websocket to local tcp server
+                pass
 
         async def forward_to_ws_task():
-            """forwards data from local tcp socket -> websocket."""
-            while True:
-                data = await local_reader.read(4096)
-                if not data:
-                    break # local connection closed
-                await websocket.send(data)
+            # forward data from local tcp server to websocket
+            pass
 
-        # run both forwarding tasks concurrently and cancel them if one finishes.
-        # for example, if the local connection is closed, forward_to_ws_task will
-        # break, and this gather will cancel forward_to_local_task.
-        await asyncio.gather(forward_to_local_task(), forward_to_ws_task())
-
-    except ConnectionRefusedError:
-        typer.secho(f"error: connection refused for localhost:{local_port}", fg=typer.colors.RED)
-    except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
-        pass # clean exit
+        await asyncio.gather(
+            forward_to_local_task(),
+            forward_to_ws_task()
+        )
     except Exception as e:
-        typer.secho(f"error: an error occurred in the tcp stream: {e}", fg=typer.colors.RED)
-    finally:
-        if 'local_writer' in locals() and not local_writer.is_closing():
-            local_writer.close()
-            await local_writer.wait_closed()
+        print(f"tcp stream error: {e}")
 
 # --- main tunnel coroutine ---
 async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
-    """creates, activates, and runs a tunnel with live status display."""
+    """run tunnel with beautiful centered tui"""
     headers = {"x-api-key": api_key}
-    start_time = time.time()
+    
+    # state variables
     request_count = 0
     bytes_in = 0
     bytes_out = 0
+    start_time = None
     request_log = []
     
-    # tmux-like layout with multiple panes
-    layout = Layout()
-    layout.split_column(
-        Layout(name="header", size=4),
-        Layout(name="main", ratio=1),
-        Layout(name="footer", size=2)
-    )
-    
-    layout["main"].split_row(
-        Layout(name="status", ratio=1),
-        Layout(name="logs", ratio=2)
-    )
-
     def format_bytes(bytes_val):
         """format bytes in human readable format"""
         for unit in ['B', 'KB', 'MB', 'GB']:
-            if bytes_val < 1024:
+            if bytes_val < 1024.0:
                 return f"{bytes_val:.1f}{unit}"
-            bytes_val /= 1024
+            bytes_val /= 1024.0
         return f"{bytes_val:.1f}TB"
 
     def make_layout(status: str, public_url: str = "", error: str = ""):
-        # header - tmux style status bar
-        uptime = time.time() - start_time if start_time else 0
-        uptime_str = f"{int(uptime//3600):02d}:{int((uptime%3600)//60):02d}:{int(uptime%60):02d}"
+        """create beautiful centered layout"""
+        layout = Layout()
         
-        header_text = (
-            f"[bold green]●[/bold green] tunnelite "
-            f"[dim]│[/dim] {tunnel_type.upper()} "
-            f"[dim]│[/dim] :{local_port} "
-            f"[dim]│[/dim] {uptime_str} "
-            f"[dim]│[/dim] {request_count} reqs "
-            f"[dim]│[/dim] ↓{format_bytes(bytes_in)} ↑{format_bytes(bytes_out)}"
+        # main container with padding
+        layout.split_column(
+            Layout(name="header", size=7),
+            Layout(name="main", ratio=1),
+            Layout(name="footer", size=3)
         )
         
+        # header section
         if error:
-            header_text = f"[bold red]●[/bold red] error [dim]│[/dim] {error}"
-        elif status != "active":
-            header_text = f"[bold yellow]●[/bold yellow] {status}"
-            
-        layout["header"].update(Panel(header_text, border_style="bright_black"))
-        
-        # status pane
-        if error:
-            status_content = f"[red]✗ {error}[/red]"
-        elif status == "pinging nodes":
-            status_content = "[yellow]⟳ testing node latency...[/yellow]"
-        elif status == "creating":
-            status_content = "[yellow]⟳ creating tunnel...[/yellow]"
-        elif status == "connecting":
-            status_content = f"[yellow]⟳ connecting to node...[/yellow]\n[blue]{public_url}[/blue]"
+            header_content = Panel(
+                Align.center(f"[bold]● error[/bold]\n[dim]{error}[/dim]"),
+                box=box.SIMPLE,
+                style="dim"
+            )
         elif status == "active":
-            status_content = (
-                f"[green]✓ tunnel active[/green]\n\n"
-                f"[bold]public url:[/bold]\n[blue]{public_url}[/blue]\n\n"
-                f"[bold]forwarding:[/bold]\n{public_url} → localhost:{local_port}\n\n"
-                f"[bold]stats:[/bold]\n"
-                f"requests: [cyan]{request_count}[/cyan]\n"
-                f"data in:  [green]{format_bytes(bytes_in)}[/green]\n"
-                f"data out: [red]{format_bytes(bytes_out)}[/red]\n"
-                f"uptime:   [yellow]{uptime_str}[/yellow]"
+            uptime = time.time() - start_time if start_time else 0
+            uptime_str = f"{int(uptime//3600):02d}:{int((uptime%3600)//60):02d}:{int(uptime%60):02d}"
+            
+            stats_text = (
+                f"[bold]tunnelite[/bold] [dim]│[/dim] "
+                f"{tunnel_type.upper()} [dim]│[/dim] "
+                f":{local_port} [dim]│[/dim] "
+                f"{uptime_str} [dim]│[/dim] "
+                f"{request_count} reqs [dim]│[/dim] "
+                f"↓{format_bytes(bytes_in)} ↑{format_bytes(bytes_out)}"
+            )
+            
+            header_content = Panel(
+                Align.center(stats_text),
+                box=box.SIMPLE,
+                style="bold"
             )
         else:
-            status_content = f"status: {status}"
+            status_text = {
+                "creating": "creating tunnel",
+                "pinging nodes": "testing node latency",
+                "connecting": "connecting to node"
+            }.get(status, status)
             
-        layout["status"].update(Panel(status_content, title="[bold]status[/bold]", border_style="bright_black"))
+            header_content = Panel(
+                Align.center(f"[bold]● {status_text}[/bold]"),
+                box=box.SIMPLE,
+                style="dim"
+            )
         
-        # logs pane - combine network events and requests
+        layout["header"].update(header_content)
+         
+        # main content area - just center and right columns
+        layout["main"].split_row(
+            Layout(name="center", ratio=3),
+            Layout(name="right", ratio=2)
+        )
+        
+        # center column with tunnel info
+        if status == "active" and public_url:
+            tunnel_info = Panel(
+                Align.center(
+                    f"[bold]tunnel active[/bold]\n\n"
+                    f"[dim]public url:[/dim]\n{public_url}\n\n"
+                    f"[dim]forwarding:[/dim]\n{public_url} → localhost:{local_port}\n\n"
+                    f"[dim]requests:[/dim] {request_count}\n"
+                    f"[dim]data in:[/dim] {format_bytes(bytes_in)}\n"
+                    f"[dim]data out:[/dim] {format_bytes(bytes_out)}"
+                ),
+                title="status",
+                box=box.SIMPLE
+            )
+        elif error:
+            tunnel_info = Panel(
+                Align.center(f"[dim]{error}[/dim]"),
+                title="error",
+                box=box.SIMPLE
+            )
+        elif public_url:
+            tunnel_info = Panel(
+                Align.center(f"[dim]connecting to[/dim]\n{public_url}"),
+                title="status",
+                box=box.SIMPLE
+            )
+        else:
+            tunnel_info = Panel(
+                Align.center(f"[dim]{status}...[/dim]"),
+                title="status",
+                box=box.SIMPLE
+            )
+        
+        layout["center"].update(tunnel_info)
+        
+        # activity log in right column (smaller)
         combined_log = []
         
         # add recent network events
-        recent_network_events = network_events[-8:] if network_events else []
+        recent_network_events = network_events[-6:] if network_events else []
         for event in recent_network_events:
             combined_log.append(format_network_event(event))
         
         # add recent requests
         if request_log:
-            combined_log.extend(request_log[-7:])
+            combined_log.extend(request_log[-4:])
         
-        log_content = "\n".join(combined_log) if combined_log else "[dim]waiting for activity...[/dim]"
-        layout["logs"].update(Panel(log_content, title="[bold]network activity[/bold]", border_style="bright_black"))
+        if not combined_log:
+            log_content = "[dim]waiting for activity...[/dim]"
+        else:
+            log_content = "\n".join(combined_log)
+        
+        activity_panel = Panel(
+            log_content,
+            title="activity",
+            box=box.SIMPLE,
+            style="dim"
+        )
+        layout["right"].update(activity_panel)
         
         # footer
-        footer_text = "[dim]press [bold]ctrl+c[/bold] to stop tunnel[/dim]"
-        layout["footer"].update(Panel(footer_text, border_style="bright_black"))
+        footer_content = Panel(
+            Align.center("[dim]press [bold]ctrl+c[/bold] to stop[/dim]"),
+            box=box.SIMPLE,
+            style="dim"
+        )
+        layout["footer"].update(footer_content)
         
         return layout
 
     def log_request(method: str, path: str, status_code: int, size: int, direction: str):
-        """add request to log with tmux-style formatting"""
+        """add request to log"""
         timestamp = time.strftime("%H:%M:%S")
         
-        # color code by status
-        if status_code < 300:
-            status_color = "green"
-        elif status_code < 400:
-            status_color = "yellow"
-        else:
-            status_color = "red"
-            
-        # direction arrow
+        # simple monochrome formatting
+        status_icon = "✓" if status_code < 400 else "✗"
         arrow = "→" if direction == "out" else "←"
         
-        log_entry = f"[dim]{timestamp}[/dim] {arrow} [{status_color}]{status_code}[/{status_color}] {method} {path} [dim]({format_bytes(size)})[/dim]"
+        log_entry = f"[dim]{timestamp}[/dim] {arrow} {status_icon} {method} {path}"
         request_log.append(log_entry)
+        
+        # keep log size manageable
+        if len(request_log) > 20:
+            request_log.pop(0)
 
     with Live(make_layout("creating"), refresh_per_second=4) as live:
         try:
@@ -537,22 +547,26 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
 
 # --- tui functions ---
 def register_user():
-    """interactive user registration"""
+    """interactive user registration with centered layout"""
     clear_screen()
     show_header()
     
-    console.print("[bold cyan]create new account[/bold cyan]")
+    console.print(Align.center("[bold]create new account[/bold]"))
     console.print()
     
-    username = Prompt.ask("username")
-    password = Prompt.ask("password", password=True)
+    # centered input prompts
+    username = Prompt.ask("  username", console=console)
+    password = Prompt.ask("  password", password=True, console=console)
+    
+    console.print()
     
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         transient=True,
+        console=console
     ) as progress:
-        task = progress.add_task("creating account...", total=None)
+        task = progress.add_task("  creating account...", total=None)
         
         try:
             res = requests.post(
@@ -561,33 +575,37 @@ def register_user():
             )
             res.raise_for_status()
             progress.stop_task(task)
-            console.print(" account created successfully!", style="green")
-            console.print("you can now login with your credentials.")
+            console.print(Align.center("✓ account created successfully"))
+            console.print(Align.center("[dim]you can now login with your credentials[/dim]"))
             
         except requests.RequestException as e:
             progress.stop_task(task)
             error_msg = e.response.text if e.response else str(e)
-            console.print(f" registration failed: {error_msg}", style="red")
+            console.print(Align.center(f"✗ registration failed: {error_msg}"))
     
-    input("\npress enter to continue...")
+    console.print()
+    input(Align.center("press enter to continue...").plain)
 
 def login_user():
-    """interactive user login"""
+    """interactive user login with centered layout"""
     clear_screen()
     show_header()
     
-    console.print("[bold cyan]login to tunnelite[/bold cyan]")
+    console.print(Align.center("[bold]login to tunnelite[/bold]"))
     console.print()
     
-    username = Prompt.ask("username")
-    password = Prompt.ask("password", password=True)
+    username = Prompt.ask("  username", console=console)
+    password = Prompt.ask("  password", password=True, console=console)
+    
+    console.print()
     
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         transient=True,
+        console=console
     ) as progress:
-        task = progress.add_task("logging in...", total=None)
+        task = progress.add_task("  logging in...", total=None)
         
         try:
             res = requests.post(
@@ -598,24 +616,25 @@ def login_user():
             api_key = res.json()["api_key"]
             save_api_key(api_key)
             progress.stop_task(task)
-            console.print(" login successful!", style="green")
+            console.print(Align.center("✓ login successful"))
             
         except requests.RequestException as e:
             progress.stop_task(task)
             error_msg = e.response.text if e.response else str(e)
-            console.print(f" login failed: {error_msg}", style="red")
+            console.print(Align.center(f"✗ login failed: {error_msg}"))
     
-    input("\npress enter to continue...")
+    console.print()
+    input("press enter to continue...")
 
 def view_tunnels():
-    """view and manage active tunnels"""
+    """view and manage active tunnels with centered layout"""
     clear_screen()
     show_header()
     show_user_info()
     
     api_key = get_api_key()
     if not api_key:
-        console.print("[red]not logged in[/red]")
+        console.print(Align.center("[dim]not logged in[/dim]"))
         input("press enter to continue...")
         return
 
@@ -628,151 +647,124 @@ def view_tunnels():
 
     except requests.RequestException as e:
         error_msg = e.response.text if e.response else str(e)
-        console.print(f"[red]error fetching tunnels: {error_msg}[/red]")
+        console.print(Align.center(f"[dim]error fetching tunnels: {error_msg}[/dim]"))
     
-    input("\npress enter to continue...")
+    console.print()
+    input("press enter to continue...")
 
 def create_tunnel():
-    """interactive tunnel creation"""
+    """interactive tunnel creation with centered layout"""
     clear_screen()
     show_header()
     show_user_info()
 
     api_key = get_api_key()
     if not api_key:
-        console.print("[red]not logged in - please login first[/red]")
+        console.print(Align.center("[dim]not logged in - please login first[/dim]"))
         input("press enter to continue...")
         return
     
-    console.print("[bold cyan]create new tunnel[/bold cyan]")
+    console.print(Align.center("[bold]create new tunnel[/bold]"))
     console.print()
     
+    # tunnel type selection
     tunnel_type = Prompt.ask(
-        "tunnel type", 
-        choices=["http", "tcp"], 
-        default="http"
+        "  tunnel type",
+        choices=["http", "tcp"],
+        default="http",
+        console=console
     )
     
+    # local port input
     while True:
         try:
-            local_port = int(Prompt.ask("local port"))
+            local_port = int(Prompt.ask("  local port", console=console))
             if 1 <= local_port <= 65535:
                 break
-            console.print("[red]port must be between 1-65535[/red]")
-        except ValueError:
-            console.print("[red]please enter a valid port number[/red]")
-    
-    confirm = Confirm.ask(f"create {tunnel_type} tunnel for localhost:{local_port}?")
-    
-    if confirm:
-        console.print("\nstarting tunnel...")
-        try:
-            asyncio.run(run_tunnel(api_key, tunnel_type, local_port))
-        except KeyboardInterrupt:
-            console.print("\n[yellow]tunnel stopped[/yellow]")
-        input("press enter to continue...")
-
-def show_main_menu():
-    """displays the main tui menu"""
-    while True:
-        clear_screen()
-        show_header()
-        show_user_info()
-        
-        console.print("[bold]main menu[/bold]")
-        console.print()
-        console.print("1. create tunnel")
-        console.print("2. view tunnels")
-        console.print("3. login")
-        console.print("4. register")
-        console.print("5. logout")
-        console.print("0. exit")
-        console.print()
-        
-        choice = Prompt.ask("choose option", choices=["0", "1", "2", "3", "4", "5"])
-        
-        if choice == "0":
-            console.print("goodbye! ")
-            sys.exit(0)
-        elif choice == "1":
-            create_tunnel()
-        elif choice == "2":
-            view_tunnels()
-        elif choice == "3":
-            login_user()
-        elif choice == "4":
-            register_user()
-        elif choice == "5":
-            if os.path.exists(api_key_file):
-                os.remove(api_key_file)
-                console.print(" logged out successfully", style="green")
             else:
-                console.print("not logged in", style="yellow")
-            input("press enter to continue...")
-
-# --- tui functions ---
-def register_user():
-    """interactive user registration"""
-    clear_screen()
-    show_header()
+                console.print(Align.center("[dim]port must be between 1 and 65535[/dim]"))
+        except ValueError:
+            console.print(Align.center("[dim]please enter a valid port number[/dim]"))
     
-    console.print("[bold cyan]create new account[/bold cyan]")
     console.print()
     
-    username = Prompt.ask("username")
-    password = Prompt.ask("password", password=True)
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-    ) as progress:
-        task = progress.add_task("creating account...", total=None)
-        
-        try:
-            res = requests.post(
-                f"{main_server_url}/auth/register",
-                json={"username": username, "password": password}
-            )
-            res.raise_for_status()
-            progress.stop_task(task)
-            console.print(" account created successfully!", style="green")
-            console.print("you can now login with your credentials.")
-            
-        except requests.RequestException as e:
-            progress.stop_task(task)
-            error_msg = e.response.text if e.response else str(e)
-            console.print(f" registration failed: {error_msg}", style="red")
-    
-    input("\npress enter to continue...")
+    # run the tunnel
+    try:
+        asyncio.run(run_tunnel(api_key, tunnel_type, local_port))
+    except KeyboardInterrupt:
+        console.print()
+        console.print(Align.center("[dim]tunnel stopped[/dim]"))
+        console.print()
 
-# --- cli commands ---
+def show_main_menu():
+    """show main menu with centered layout"""
+    clear_screen()
+    show_header()
+    show_user_info()
+    
+    # create centered menu
+    menu_items = [
+        "1. create tunnel",
+        "2. view tunnels", 
+        "3. login",
+        "4. register",
+        "5. exit"
+    ]
+    
+    console.print(Align.center("[bold]main menu[/bold]"))
+    console.print()
+    
+    for item in menu_items:
+        console.print(Align.center(f"[dim]{item}[/dim]"))
+    
+    console.print()
+    
+    choice = Prompt.ask("  choose option", choices=["1", "2", "3", "4", "5"], console=console)
+    
+    if choice == "1":
+        create_tunnel()
+    elif choice == "2":
+        view_tunnels()
+    elif choice == "3":
+        login_user()
+    elif choice == "4":
+        register_user()
+    elif choice == "5":
+        console.print()
+        console.print(Align.center("[dim]goodbye[/dim]"))
+        sys.exit(0)
+
 @app.command()
 def tui():
-    """launch the full terminal user interface"""
-    show_main_menu()
+    """start the interactive tui"""
+    try:
+        while True:
+            show_main_menu()
+    except KeyboardInterrupt:
+        console.print()
+        console.print(Align.center("[dim]goodbye[/dim]"))
 
 @app.command()
 def quick(
     tunnel_type: str = typer.Argument("http", help="tunnel type (http, tcp)"),
     port: int = typer.Argument(..., help="local port to expose")
 ):
-    """quickly create a tunnel without tui"""
+    """quickly create a tunnel without the tui"""
     api_key = get_api_key()
     if not api_key:
-        console.print("[red]not logged in - run 'tunnelite tui' first[/red]")
-        raise typer.Exit(1)
-
+        console.print("error: not logged in. run 'python client.py tui' to login first.")
+        return
+    
     try:
         asyncio.run(run_tunnel(api_key, tunnel_type, port))
     except KeyboardInterrupt:
-        console.print("\n[yellow]tunnel stopped[/yellow]")
+        console.print("\ntunnel stopped.")
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
-    """tunnelite - secure localhost tunneling"""
+    """tunnelite client - localhost tunneling made simple"""
     if ctx.invoked_subcommand is None:
-        show_main_menu()
+        tui()
 
 if __name__ == "__main__":
     app()

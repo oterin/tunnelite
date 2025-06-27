@@ -1,8 +1,8 @@
 import anyio
+import time
 from fastapi import APIRouter, Request, Response, HTTPException, status
 from .connection_manager import manager
 from .network_logger import network_logger, NetworkEvent, NetworkEventType
-import time
 
 # a new router for the proxy logic.
 # it has no prefix, so its routes are at the root of the app.
@@ -163,63 +163,83 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
         async with anyio.create_task_group() as tg:
             async def public_to_ws():
                 nonlocal packet_count_in, bytes_in
-                while True:
-                    data = await client_stream.receive(4096)
-                    if not data: break
-                    
-                    packet_count_in += 1
-                    bytes_in += len(data)
-                    
-                    # log tcp packet
-                    network_logger.log_event(NetworkEvent(
-                        timestamp=time.time(),
-                        event_type=NetworkEventType.TCP_PACKET,
-                        tunnel_id=tunnel_id,
-                        client_ip=client_addr,
-                        bytes_transferred=len(data),
-                        direction="in",
-                        protocol="tcp",
-                        metadata={"packet_number": packet_count_in}
-                    ))
-                    
-                    print(f"tcp:      tunnel {tunnel_id[:8]} → client: packet #{packet_count_in}, {len(data)} bytes (total: {bytes_in} bytes)")
-                    
-                    await manager.forward_to_client(tunnel_id, data)
-                tg.cancel_scope.cancel()
+                try:
+                    while True:
+                        data = await client_stream.receive(4096)
+                        if not data: 
+                            break
+                        
+                        packet_count_in += 1
+                        bytes_in += len(data)
+                        
+                        # log tcp packet
+                        network_logger.log_event(NetworkEvent(
+                            timestamp=time.time(),
+                            event_type=NetworkEventType.TCP_PACKET,
+                            tunnel_id=tunnel_id,
+                            client_ip=client_addr,
+                            bytes_transferred=len(data),
+                            direction="in",
+                            protocol="tcp",
+                            metadata={"packet_number": packet_count_in}
+                        ))
+                        
+                        print(f"tcp:      tunnel {tunnel_id[:8]} → client: packet #{packet_count_in}, {len(data)} bytes (total: {bytes_in} bytes)")
+                        
+                        await manager.forward_to_client(tunnel_id, data)
+                except (anyio.EndOfStream, anyio.BrokenResourceError, anyio.ClosedResourceError):
+                    # client disconnected cleanly
+                    pass
+                except Exception as e:
+                    print(f"debug:    public_to_ws task error: {e}")
+                finally:
+                    tg.cancel_scope.cancel()
 
             async def ws_to_public():
                 nonlocal packet_count_out, bytes_out
-                connection = manager.get_connection_by_id(tunnel_id)
-                if not connection:
-                    tg.cancel_scope.cancel()
-                    return
+                try:
+                    connection = manager.get_connection_by_id(tunnel_id)
+                    if not connection:
+                        return
 
-                while True:
-                    response_data = await connection.response_queue.get()
-                    if response_data is None: break
-                    
-                    packet_count_out += 1
-                    bytes_out += len(response_data)
-                    
-                    # log tcp packet
-                    network_logger.log_event(NetworkEvent(
-                        timestamp=time.time(),
-                        event_type=NetworkEventType.TCP_PACKET,
-                        tunnel_id=tunnel_id,
-                        client_ip=client_addr,
-                        bytes_transferred=len(response_data),
-                        direction="out",
-                        protocol="tcp",
-                        metadata={"packet_number": packet_count_out}
-                    ))
-                    
-                    print(f"tcp:      tunnel {tunnel_id[:8]} ← client: packet #{packet_count_out}, {len(response_data)} bytes (total: {bytes_out} bytes)")
-                    
-                    await client_stream.send(response_data)
-                tg.cancel_scope.cancel()
+                    while True:
+                        try:
+                            response_data = await connection.response_queue.get()
+                            if response_data is None: 
+                                break
+                            
+                            packet_count_out += 1
+                            bytes_out += len(response_data)
+                            
+                            # log tcp packet
+                            network_logger.log_event(NetworkEvent(
+                                timestamp=time.time(),
+                                event_type=NetworkEventType.TCP_PACKET,
+                                tunnel_id=tunnel_id,
+                                client_ip=client_addr,
+                                bytes_transferred=len(response_data),
+                                direction="out",
+                                protocol="tcp",
+                                metadata={"packet_number": packet_count_out}
+                            ))
+                            
+                            print(f"tcp:      tunnel {tunnel_id[:8]} ← client: packet #{packet_count_out}, {len(response_data)} bytes (total: {bytes_out} bytes)")
+                            
+                            await client_stream.send(response_data)
+                        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+                            # client disconnected
+                            break
+                except Exception as e:
+                    print(f"debug:    ws_to_public task error: {e}")
+                finally:
+                    tg.cancel_scope.cancel()
 
             tg.start_soon(public_to_ws)
             tg.start_soon(ws_to_public)
+            
+    except anyio.get_cancelled_exc_class():
+        # task group was cancelled, this is expected
+        pass
     except Exception as e:
         # log connection error
         network_logger.log_event(NetworkEvent(
@@ -252,7 +272,12 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
         ))
         
         print(f"info:     tcp connection closed for tunnel {tunnel_id}: {packet_count_in} packets in ({bytes_in} bytes), {packet_count_out} packets out ({bytes_out} bytes)")
-        await client_stream.aclose()
+        
+        # ensure client stream is properly closed
+        try:
+            await client_stream.aclose()
+        except:
+            pass
 
 async def start_tcp_listener(tunnel_id: str, port: int):
     """starts a dedicated tcp listener for a single tunnel on a specific port."""
