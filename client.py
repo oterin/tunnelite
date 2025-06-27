@@ -8,6 +8,7 @@ import platform
 import sys
 import time
 from typing import Optional, List, Dict
+from urllib.parse import urlparse
 
 import requests
 import typer
@@ -338,7 +339,12 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                 await asyncio.sleep(3)
                 return
             
-            node_ws_url = target_node["public_address"].replace("http", "ws", 1)
+            # use the hostname for the connection, not the ip, for proper ssl verification.
+            # the port is taken from the public_address.
+            hostname_for_ws = target_node["public_hostname"]
+            port_for_ws = urlparse(target_node["public_address"]).port
+            
+            node_ws_url = f"wss://{hostname_for_ws}:{port_for_ws}"
             connect_uri = f"{node_ws_url}/ws/connect"
             
             # 4. connect and run tunnel
