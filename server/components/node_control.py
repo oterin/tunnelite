@@ -2,6 +2,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from server.logger import log
+from server import security
 
 class NodeConnectionManager:
     """manages persistent websocket connections from tunnel nodes."""
@@ -45,6 +46,43 @@ node_manager = NodeConnectionManager()
 # create the router for this component
 router = APIRouter(tags=["node control"])
 
+
+@router.websocket("/ws/node-control-jwt")
+async def node_control_websocket_jwt(websocket: WebSocket):
+    """jwt-based node control channel"""
+    node_secret_id = None
+    try:
+        await websocket.accept()
+        
+        # get token from query params
+        token = websocket.query_params.get("token")
+        if not token:
+            await websocket.close(code=1008, reason="missing token")
+            return
+            
+        claims = security.verify(token)
+        node_secret_id = claims["sub"]
+        
+        await node_manager.connect(node_secret_id, websocket)
+        
+        # keep connection alive
+        while True:
+            await websocket.receive_text()
+            
+    except ValueError as e:
+        if websocket.client_state.name != "DISCONNECTED":
+            await websocket.close(code=1008, reason=f"auth failed: {e}")
+    except WebSocketDisconnect:
+        if node_secret_id:
+            node_manager.disconnect(node_secret_id)
+    except Exception:
+        log.error(
+            "error in jwt node control websocket",
+            extra={"node_secret_id": node_secret_id},
+            exc_info=True
+        )
+        if node_secret_id:
+            node_manager.disconnect(node_secret_id)
 
 @router.websocket("/ws/node-control")
 async def node_control_websocket(websocket: WebSocket):

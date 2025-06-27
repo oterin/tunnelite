@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from server.components import database
 from server.components.models import Node
+from server import security
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -73,3 +74,32 @@ async def get_available_nodes():
                 "public_address": node.get("public_address")
             })
     return public_nodes
+
+@router.post("/heartbeat")
+async def node_heartbeat(node_info: NodeInfo, x_node_cert: str = Header(...)):
+    """jwt-based heartbeat for authenticated nodes"""
+    try:
+        claims = security.verify(x_node_cert)
+        node_secret_id = claims["sub"]
+        
+        # get existing node or create new one
+        node = database.get_node_by_secret_id(node_secret_id)
+        if not node:
+            node = {"node_secret_id": node_secret_id}
+        
+        # update with heartbeat data
+        node.update(node_info.model_dump())
+        node["last_seen_at"] = time.time()
+        
+        database.upsert_node(node)
+        
+        return {
+            "status": node.get("status", "pending"),
+            "message": f"heartbeat received via jwt. current status: {node.get('status', 'pending')}"
+        }
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"invalid node certificate: {e}"
+        )

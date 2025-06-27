@@ -15,15 +15,13 @@ from server.components import database
 from server.logger import log
 # load config
 from server import config
+from server import security
 
 router = APIRouter(prefix="/registration", tags=["node registration"])
 
 ADMIN_API_KEY = config.get("TUNNELITE_ADMIN_KEY")
 if not ADMIN_API_KEY:
     raise ValueError("TUNNELITE_ADMIN_KEY not configured")
-
-# debug log for startup
-log.info("registration component expecting admin key", extra={"admin_key_start": ADMIN_API_KEY[:8] + "..."})
 
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -71,17 +69,12 @@ async def register_node_websocket(websocket: WebSocket):
         admin_key = data.get("admin_key")
 
         if admin_key != ADMIN_API_KEY:
-            log.warning(
-                "node registration failed auth",
-                extra={"node_secret_id": node_secret_id, "provided_key": str(admin_key)[:8] + "..."}
-            )
             raise WebSocketDisconnect(code=1008, reason="invalid admin key.")
 
         if not node_secret_id:
             raise WebSocketDisconnect(code=1008, reason="node_secret_id is required.")
 
         node_record = database.get_node_by_secret_id(node_secret_id)
-        log.info("debug: node_record fetched", extra={"node_record": node_record})
         if not node_record:
             log.warning("node record not found during registration", extra={"node_secret_id": node_secret_id})
             raise WebSocketDisconnect(code=1008, reason="node not registered (send heartbeat first)")
@@ -142,10 +135,18 @@ async def register_node_websocket(websocket: WebSocket):
 
         public_hostname = generate_unique_node_hostname(country_code)
 
+        # generate node certificate for future auth
+        node_cert = security.sign({
+            "sub": node_secret_id,
+            "role": "node",
+            "hostname": public_hostname
+        }, ttl=12*3600)  # 12 hours
+        
         final_node_data = {
             "node_secret_id": node_secret_id,
             "public_hostname": public_hostname, # the official, server-assigned name
             "status": "approved",
+            "node_cert": node_cert,
             "max_clients": int(max_clients),
             "port_range": port_range_str,
             "bandwidth_down_mbps": round(down_mbps, 2),
@@ -157,7 +158,11 @@ async def register_node_websocket(websocket: WebSocket):
             "Node registration successful",
             extra={"node_secret_id": node_secret_id, "public_hostname": public_hostname}
         )
-        await websocket.send_json({"type": "success", "message": f"node verified and approved! your public hostname is: {public_hostname}"})
+        await websocket.send_json({
+            "type": "success", 
+            "message": f"node verified and approved! your public hostname is: {public_hostname}",
+            "node_cert": node_cert
+        })
 
     except WebSocketDisconnect as e:
         log.warning(

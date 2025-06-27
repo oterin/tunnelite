@@ -3,5 +3,6 @@
   "TUNNELITE_SERVER_URL": "https://api.tunnelite.net",
   "NODE_PUBLIC_ADDRESS": "http://34.90.213.59:8201",
   "LOG_LEVEL": "INFO",
-  "ENFORCE_HTTPS": "false"
+  "ENFORCE_HTTPS": "false",
+  "JWT_SECRET": "SuperSecretJWTKeyForNodeAuthentication123456789"
 } 

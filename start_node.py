@@ -57,6 +57,7 @@ CERT_FILE = "ssl/cert.pem"       # tls cert for node
 KEY_FILE = "ssl/key.pem"         # tls key for node
 SECRET_ID_FILE = "node_secret_id.txt"  # local file storing node uuid
 BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb payload for bandwidth test
+CERT_TOKEN_FILE = "node_cert.txt"     # jwt token for node auth
 
 # --- phase 1: interactive registration logic ---
 
@@ -123,8 +124,6 @@ async def run_interactive_registration(node_secret_id: str):
     ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
-    # debug print admin key being sent
-    print(f"debug: admin key being used: {ADMIN_API_KEY}")
 
     try:
         async with websockets.connect(ws_uri, ssl=True) as websocket:
@@ -173,6 +172,9 @@ async def run_interactive_registration(node_secret_id: str):
                     print(f"[server] {message.get('message', '...')}")
                 elif msg_type == "success":
                     print(f"\n[server] success: {message.get('message', 'registration complete!')}")
+                    # save node certificate if provided
+                    if "node_cert" in message:
+                        save_node_cert(message["node_cert"])
                     return True
                 elif msg_type == "failure":
                     print(f"\n[server] failed: {message.get('message', 'registration failed.')}")
@@ -226,6 +228,20 @@ def run_temp_api_server():
         uvicorn.run(temp_app, host=host, port=port, log_level="warning")
     except Exception as e:
         print(f"error: failed to start temporary server: {e}")
+
+def get_node_cert() -> str:
+    """gets the stored node certificate"""
+    try:
+        with open(CERT_TOKEN_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+def save_node_cert(cert: str):
+    """saves the node certificate to disk"""
+    with open(CERT_TOKEN_FILE, "w") as f:
+        f.write(cert)
+    print(f"info:     node certificate saved")
 
 # --- main entrypoint ---
 

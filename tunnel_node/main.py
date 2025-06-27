@@ -44,6 +44,8 @@ async def heartbeat_task():
         await asyncio.sleep(60)
 
         global node_status
+        node_cert = get_node_cert()
+        
         # get system metrics using psutil
         cpu_percent = psutil.cpu_percent()
         memory_info = psutil.virtual_memory()
@@ -65,10 +67,28 @@ async def heartbeat_task():
 
         try:
             print(f"info:     ({time.ctime()}) sending heartbeat...")
-            response = requests.post(
-                f"{config.MAIN_SERVER_URL}/nodes/register",
-                json=node_details
-            )
+            
+            # try jwt heartbeat first if we have a cert
+            if node_cert:
+                try:
+                    response = requests.post(
+                        f"{config.MAIN_SERVER_URL}/nodes/heartbeat",
+                        json=node_details,
+                        headers={"x-node-cert": node_cert}
+                    )
+                except requests.RequestException:
+                    # fallback to old register endpoint
+                    response = requests.post(
+                        f"{config.MAIN_SERVER_URL}/nodes/register",
+                        json=node_details
+                    )
+            else:
+                # no cert, use old endpoint
+                response = requests.post(
+                    f"{config.MAIN_SERVER_URL}/nodes/register",
+                    json=node_details
+                )
+                
             response.raise_for_status()
 
             response_data = response.json()
@@ -82,16 +102,24 @@ async def heartbeat_task():
             print(f"error:    heartbeat failed: {e}")
 
 async def node_control_channel_task():
-    ws_url = config.MAIN_SERVER_URL.replace("http", "ws", 1)
-    control_uri = f"{ws_url}/ws/node-control"
-
     while True:
         try:
+            node_cert = get_node_cert()
+            ws_url = config.MAIN_SERVER_URL.replace("http", "ws", 1)
+            
+            # use jwt endpoint if we have a cert
+            if node_cert:
+                control_uri = f"{ws_url}/ws/node-control-jwt?token={node_cert}"
+            else:
+                control_uri = f"{ws_url}/ws/node-control"
+                
             print(f"info:     connecting to server control channel at {control_uri}...")
             async with websockets.connect(control_uri) as websocket:
-                # 1. authenticate with the server
-                auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
-                await websocket.send(json.dumps(auth_payload))
+                # only send auth message for legacy endpoint
+                if not node_cert:
+                    auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
+                    await websocket.send(json.dumps(auth_payload))
+                    
                 print("info:     node control channel connected and authenticated.")
 
                 # 2. listen for commands from the server
@@ -293,3 +321,11 @@ async def websocket_endpoint(websocket: WebSocket):
         if connection and not connection.websocket.client_state.DISCONNECTED:
             await connection.websocket.close(code=1011)
             manager.disconnect(connection.tunnel_id)
+
+def get_node_cert() -> str:
+    """get node certificate from file"""
+    try:
+        with open("node_cert.txt", "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
