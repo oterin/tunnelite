@@ -36,7 +36,7 @@ def parse_port_range(range_str: str) -> List[int]:
             ports.update(range(int(start), int(end) + 1))
         else:
             ports.add(int(part))
-            return sorted(list(ports))
+    return sorted(list(ports))
 
 
 # --- reverse benchmark endpoints ---
