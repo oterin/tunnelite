@@ -55,9 +55,12 @@ async def heartbeat_task():
         # get tunnel-specific metrics from the connection manager
         tunnel_metrics = manager.get_and_reset_metrics()
 
+        # use the dynamically set address or fall back to auto-detection
+        public_address = config.NODE_PUBLIC_ADDRESS or f"http://{config.PUBLIC_IP}:8201"
+        
         node_details = {
             "node_secret_id": NODE_SECRET_ID,
-            "public_address": config.NODE_PUBLIC_ADDRESS,
+            "public_address": public_address,
             "metrics": {
                 "system": {
                     "cpu_percent": cpu_percent,
@@ -180,9 +183,11 @@ async def on_startup():
 
 def register_with_main_server():
     global node_status
+    # use the dynamically set address or fall back to auto-detection
+    public_address = config.NODE_PUBLIC_ADDRESS or f"http://{config.PUBLIC_IP}:8201"
     node_details = {
         "node_secret_id": NODE_SECRET_ID,
-        "public_address": config.NODE_PUBLIC_ADDRESS,
+        "public_address": public_address,
     }
     print(f"info:     registering with main server at {config.MAIN_SERVER_URL}...")
     try:

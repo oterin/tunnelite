@@ -26,8 +26,42 @@ RAW_MAIN_SERVER_URL = common_config.get("TUNNELITE_SERVER_URL", "https://api.tun
 # admin key for registration
 ADMIN_API_KEY = common_config.get("TUNNELITE_ADMIN_KEY")
 
-# read the node public address from config
-NODE_PUBLIC_ADDRESS = common_config.get("NODE_PUBLIC_ADDRESS")
+def get_public_ip():
+    """auto-detect public ip address"""
+    try:
+        # try multiple services for reliability
+        services = [
+            "https://api.ipify.org",
+            "https://ifconfig.me", 
+            "https://icanhazip.com"
+        ]
+        
+        for service in services:
+            try:
+                response = requests.get(service, timeout=5)
+                if response.status_code == 200:
+                    return response.text.strip()
+            except:
+                continue
+        
+        # fallback: try to detect from local network interfaces
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+        
+    except Exception as e:
+        print(f"warn:     could not auto-detect public ip: {e}")
+        return "127.0.0.1"  # fallback
+
+# auto-detect public ip
+PUBLIC_IP = get_public_ip()
+print(f"info:     detected public ip: {PUBLIC_IP}")
+
+# NODE_PUBLIC_ADDRESS will be set dynamically with actual port
+NODE_PUBLIC_ADDRESS = None
 
 def get_public_url(base_url: str) -> str:
     """
@@ -104,15 +138,16 @@ def run_reverse_benchmark():
 
 async def run_interactive_registration(node_secret_id: str):
     """the main interactive registration coroutine."""
-    if not NODE_PUBLIC_ADDRESS:
-        sys.exit("error: NODE_PUBLIC_ADDRESS not configured in values.json for registration.")
+    # for registration, we'll use a default port that gets updated later
+    temp_public_address = f"http://{PUBLIC_IP}:8201"
+    print(f"info:     using temporary address for registration: {temp_public_address}")
 
     # before registering, we must send a heartbeat so the server knows our address
     print("info:     sending initial heartbeat...")
     try:
         heartbeat_response = requests.post(
             f"{MAIN_SERVER_URL}/nodes/register",
-            json={"node_secret_id": node_secret_id, "public_address": NODE_PUBLIC_ADDRESS},
+            json={"node_secret_id": node_secret_id, "public_address": temp_public_address},
             timeout=10, verify=True
         )
         print(f"info:     initial registration successful. {heartbeat_response.json().get('message', '')}")
@@ -168,7 +203,7 @@ async def run_interactive_registration(node_secret_id: str):
                     if not port or not key: return False
                     try:
                         # connect to the local temporary api server, not the public address
-                        local_port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
+                        local_port = int(temp_public_address.split(":")[-1])
                         local_api_url = f"http://127.0.0.1:{local_port}"
                         
                         # send the challenge setup request
@@ -248,7 +283,7 @@ def run_temp_api_server():
     print("info:     starting temporary api server for registration...")
     try:
         host = "127.0.0.1"
-        port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
+        port = 8201  # use default port for temp server
         print(f"info:     temp server will bind to {host}:{port}")
         
         # check if port is available
@@ -489,7 +524,7 @@ if __name__ == "__main__":
         time.sleep(3)
 
         # verify the temp server is responding
-        temp_port = int(NODE_PUBLIC_ADDRESS.split(":")[-1])
+        temp_port = 8201  # use the same port as temp server
         temp_url = f"http://127.0.0.1:{temp_port}"
         for attempt in range(10):  # try for up to 10 seconds
             try:
@@ -534,17 +569,18 @@ if __name__ == "__main__":
     if not chosen_port:
         sys.exit(f"error: no available ports in range {available_ports}")
 
-    # update the public address to reflect the actual port we're running on
+    # set the public address to reflect the actual port we're running on
     # this ensures heartbeats and client connections use the correct port
-    original_address = NODE_PUBLIC_ADDRESS
-    host_part = NODE_PUBLIC_ADDRESS.split("://")[1].split(":")[0]
-    protocol = NODE_PUBLIC_ADDRESS.split("://")[0]
-    updated_public_address = f"{protocol}://{host_part}:{chosen_port}"
+    updated_public_address = f"http://{PUBLIC_IP}:{chosen_port}"
     
-    print(f"info:     updating public address from {original_address} to {updated_public_address}")
+    print(f"info:     setting public address to {updated_public_address}")
     
     # update the global variable so heartbeats use the correct address
     NODE_PUBLIC_ADDRESS = updated_public_address
+    
+    # also update the tunnel_node config
+    from tunnel_node import config as tunnel_config
+    tunnel_config.set_node_public_address(chosen_port)
     
     # send an immediate heartbeat to update the server with the correct address
     print(f"info:     sending immediate heartbeat to update server with correct address...")
