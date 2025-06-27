@@ -267,7 +267,7 @@ def start_worker_process(https_socket: socket):
     from tunnel_node.main import websocket_endpoint, proxy_router
     
     worker_app = FastAPI(title="tunnelite-worker")
-    worker_app.add_api_websocket_route("/ws/connect", websocket_endpoint)
+    worker_app.websocket("/ws/connect")(websocket_endpoint)
     worker_app.include_router(proxy_router)
 
     import uvicorn

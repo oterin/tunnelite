@@ -41,7 +41,7 @@ NODE_PUBLIC_ADDRESS = None  # will be set dynamically with actual port
 
 def set_node_public_address(port: int):
     """set the node public address with the actual running port"""
-    global NODE_PUBLIC_ADDRESS
+    global NODE_PUBLIC_ADDRESS  # declare global before any usage
     NODE_PUBLIC_ADDRESS = f"https://{PUBLIC_IP}:{port}"
     print(f"info:     node public address set to: {NODE_PUBLIC_ADDRESS}")
     return NODE_PUBLIC_ADDRESS
