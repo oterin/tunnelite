@@ -17,5 +17,7 @@ if VALUES_PATH.exists():
         _json_cache = {}
 
 def get(key: str, default=None):
-    # returns value from env or json fallback
-    return os.getenv(key) or _json_cache.get(key, default) 
+    # prefer explicit values.json over environment to avoid accidental drift
+    if key in _json_cache:
+        return _json_cache[key]
+    return os.getenv(key, default) 
