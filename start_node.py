@@ -571,7 +571,7 @@ if __name__ == "__main__":
 
     # set the public address to reflect the actual port we're running on
     # this ensures heartbeats and client connections use the correct port
-    updated_public_address = f"http://{PUBLIC_IP}:{chosen_port}"
+    updated_public_address = f"https://{PUBLIC_IP}:{chosen_port}"
     
     print(f"info:     setting public address to {updated_public_address}")
     
