@@ -68,6 +68,10 @@ async def register_node_websocket(websocket: WebSocket):
         admin_key = data.get("admin_key")
 
         if admin_key != ADMIN_API_KEY:
+            log.warning(
+                "node registration failed auth",
+                extra={"node_secret_id": node_secret_id, "provided_key": str(admin_key)[:8] + "..."}
+            )
             raise WebSocketDisconnect(code=1008, reason="invalid admin key.")
 
         if not node_secret_id:
