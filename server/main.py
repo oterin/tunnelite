@@ -1,13 +1,15 @@
 import asyncio
 import os
-from fastapi import Depends, FastAPI, Request, HTTPException, status
+from fastapi import FastAPI
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 
+# import rate limiting components
 from server.ratelimit import limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.middleware import SlowAPIMiddleware
 
-# import all the routers from the components
+# import all the application routers
 from server.components import (
     auth,
     tunnels,
@@ -19,39 +21,26 @@ from server.components import (
 )
 from server import garbage_collector
 
-# --- global dependencies ---
-
-async def enforce_https(request: Request):
-    """
-    a fastapi dependency that enforces https connections for all http requests.
-    it inspects the 'x-forwarded-proto' header from a reverse proxy.
-    it explicitly ignores websocket connections.
-    """
-    # do not apply this check to websockets, as they have their own wss:// scheme
-    if request.scope.get("type") == "websocket":
-        return
-
-    if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
-        if request.headers.get("x-forwarded-proto") != "https":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="insecure connections are not allowed. please use https.",
-            )
-
 # --- app initialization ---
 
 app = FastAPI(
     title="tunnelite backend",
     description="the central api server for the tunnelite service.",
     version="0.1.0",
-    # this correctly applies the dependency to all http routes
-    dependencies=[Depends(enforce_https)],
 )
 
 # add rate limiting middleware
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+# add https redirect middleware if enabled.
+# note: this is only useful if you also listen on port 80.
+# if your server only listens on 443, this middleware is not strictly necessary
+# but adds a layer of defense.
+if os.getenv("ENFORCE_HTTPS", "false").lower() == "true":
+    app.add_middleware(HTTPSRedirectMiddleware)
+
 
 # include all the application routers
 app.include_router(auth.router)

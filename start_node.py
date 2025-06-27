@@ -25,7 +25,7 @@ HTTPS_PORT = 443
 CERT_FILE = "ssl/cert.pem"
 KEY_FILE = "ssl/key.pem"
 SECRET_ID_FILE = "node_secret_id.txt"
-BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb
+BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
 # --- url configuration and normalization ---
 # read the raw url from the environment, defaulting to the production url
@@ -51,6 +51,7 @@ def get_public_url(base_url: str) -> str:
 
 MAIN_SERVER_URL = get_public_url(RAW_MAIN_SERVER_URL)
 
+
 # --- phase 1: interactive registration logic ---
 
 def get_node_secret_id():
@@ -68,6 +69,7 @@ def get_node_secret_id():
 def run_reverse_benchmark():
     """
     performs a speed test by connecting *out* to the main server.
+    this avoids firewall issues on the node.
     """
     print("info:     performing reverse benchmark...")
     try:
@@ -101,6 +103,7 @@ async def run_interactive_registration(node_secret_id: str):
     if not NODE_PUBLIC_ADDRESS:
         sys.exit("error: NODE_PUBLIC_ADDRESS not found in environment for registration.")
 
+    # before registering, we must send a heartbeat so the server knows our address
     print("info:     sending initial heartbeat...")
     try:
         requests.post(
@@ -111,7 +114,7 @@ async def run_interactive_registration(node_secret_id: str):
     except requests.RequestException as e:
         sys.exit(f"error: could not send initial heartbeat to main server: {e}")
 
-    ws_uri = MAIN_SERVER_URL.replace("https", "wss") + "/ws/register-node"
+    ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/ws/register-node"
     print(f"--- tunnelite node registration ---")
     print(f"connecting to {ws_uri}...")
 
@@ -127,8 +130,12 @@ async def run_interactive_registration(node_secret_id: str):
                 message_str = await websocket.recv()
                 try:
                     message = json.loads(message_str)
-                    if not isinstance(message, dict): continue
-                except json.JSONDecodeError: continue
+                    if not isinstance(message, dict):
+                        print(f"warn:     received non-dict message from server: {message_str}")
+                        continue
+                except json.JSONDecodeError:
+                    print(f"warn:     received malformed json from server: {message_str}")
+                    continue
 
                 msg_type = message.get("type")
 
@@ -201,6 +208,7 @@ def start_worker_process(https_socket: socket):
     server = uvicorn.Server(config)
     server.run()
 
+
 def run_temp_api_server():
     print("info:     starting temporary api server for registration...")
     try:
@@ -226,7 +234,8 @@ if __name__ == "__main__":
         res = requests.get(
             f"{MAIN_SERVER_URL}/nodes/me",
             headers={"x-node-secret-id": node_secret_id},
-            timeout=10, verify=True
+            timeout=10,
+            verify=True
         )
         if res.status_code == 200:
             if res.json().get("status") == "approved":
