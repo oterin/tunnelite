@@ -569,6 +569,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                         
                 elif tunnel_type in ["tcp", "udp"]:
                     add_network_event("tunnel", f"starting {tunnel_type} tunnel on port {local_port}")
+                    print(f"debug:    starting tcp tunnel, forwarding {public_url} -> localhost:{local_port}")
                     await handle_tcp_stream(local_port, websocket)
 
         except requests.RequestException as e:

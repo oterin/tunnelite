@@ -186,6 +186,7 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
                         
                         print(f"tcp:      tunnel {tunnel_id[:8]} → client: packet #{packet_count_in}, {len(data)} bytes (total: {bytes_in} bytes)")
                         
+                        print(f"debug:    forwarding {len(data)} bytes to client via websocket")
                         await manager.forward_to_client(tunnel_id, data)
                 except (anyio.EndOfStream, anyio.BrokenResourceError, anyio.ClosedResourceError):
                     # client disconnected cleanly
@@ -204,8 +205,10 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
 
                     while True:
                         try:
+                            print(f"debug:    waiting for response from client via websocket...")
                             response_data = await connection.response_queue.get()
                             if response_data is None: 
+                                print(f"debug:    received None from response queue, breaking")
                                 break
                             
                             packet_count_out += 1
@@ -224,6 +227,7 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
                             ))
                             
                             print(f"tcp:      tunnel {tunnel_id[:8]} ← client: packet #{packet_count_out}, {len(response_data)} bytes (total: {bytes_out} bytes)")
+                            print(f"debug:    sending {len(response_data)} bytes back to external client")
                             
                             await client_stream.send(response_data)
                         except (anyio.BrokenResourceError, anyio.ClosedResourceError):
