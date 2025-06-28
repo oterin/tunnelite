@@ -122,10 +122,10 @@ async def heartbeat_task():
                     )
             else:
                 # no cert, use old endpoint
-            response = requests.post(
-                f"{config.MAIN_SERVER_URL}/nodes/register",
-                json=node_details
-            )
+                response = requests.post(
+                    f"{config.MAIN_SERVER_URL}/nodes/register",
+                    json=node_details
+                )
                 
             response.raise_for_status()
 
@@ -189,8 +189,8 @@ async def node_control_channel_task():
             async with websockets.connect(control_uri, ssl=True) as websocket:
                 # only send auth message for legacy endpoint
                 if not node_cert:
-                auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
-                await websocket.send(json.dumps(auth_payload))
+                    auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
+                    await websocket.send(json.dumps(auth_payload))
                     
                 print("info:     node control channel connected successfully.")
                 retry_count = 0  # reset retry count on successful connection
@@ -235,13 +235,13 @@ async def on_startup():
     # start background tasks
     print("info:     starting background tasks (heartbeat, control channel, cleanup)...")
     if ENABLE_BACKGROUND_TASKS:
-    asyncio.create_task(heartbeat_task())
+        asyncio.create_task(heartbeat_task())
         asyncio.create_task(cleanup_task())
     
     # wait a moment before starting control channel to let registration settle
     await asyncio.sleep(5)
     if ENABLE_BACKGROUND_TASKS:
-    asyncio.create_task(node_control_channel_task())
+        asyncio.create_task(node_control_channel_task())
 
 def register_with_main_server():
     global node_status
@@ -310,7 +310,7 @@ def run_challenge_server(port, key):
         
         # set a longer timeout to handle server delays
         server.timeout = 30
-    server.handle_request()
+        server.handle_request()
         print(f"info:     challenge listener on port {port} handled request and finished")
     except OSError as e:
         print(f"error:    failed to bind challenge listener to port {port}: {e}")
@@ -346,7 +346,7 @@ async def setup_challenge_listener(req: ChallengeRequest):
             daemon=True,
             name=f"challenge-listener-{req.port}"
         )
-    server_thread.start()
+        server_thread.start()
         
         # give the server a moment to start and bind
         await asyncio.sleep(1.5)
@@ -418,7 +418,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
         if not response.ok:
             try:
-            error_detail = response.json().get("detail", "activation failed")
+                error_detail = response.json().get("detail", "activation failed")
             except (ValueError, AttributeError):
                 error_detail = f"HTTP {response.status_code}: {response.text}"
             print(f"error:    activation failed from main server: {error_detail}")
@@ -427,123 +427,57 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # 4. activation successful. use the authoritative data from the server
         try:
-        official_tunnel_data = response.json()
+            official_tunnel_data = response.json()
         except ValueError as e:
             print(f"error:    failed to parse activation response as JSON: {e}")
             await websocket.close(code=1011, reason="server returned invalid activation response")
             return
-            
-        print(f"info:     activation successful: {official_tunnel_data}")
-        public_url = official_tunnel_data.get("public_url")
-        tunnel_id = official_tunnel_data.get("tunnel_id")
 
-        if not public_url or not tunnel_id:
-            await websocket.close(code=1011, reason="server returned invalid activation response")
-            return
-
-        public_hostname = public_url.split("://")[1].split(":")[0]
-        tunnel_type = official_tunnel_data.get("tunnel_type")
-
-        connection = await manager.connect(tunnel_id, public_hostname, websocket)
-
-        # log tunnel activation
-        network_logger.log_event(NetworkEvent(
-            timestamp=time.time(),
-            event_type=NetworkEventType.TUNNEL_ACTIVATE,
+        # 5. register the connection with our manager
+        print(f"info:     creating tunnel connection for {tunnel_id}")
+        connection = await manager.create_tunnel_connection(
             tunnel_id=tunnel_id,
-            protocol=tunnel_type,
-            metadata={
-                "public_url": public_url,
-                "public_hostname": public_hostname,
-                "local_port": official_tunnel_data.get("local_port")
-            }
-        ))
+            tunnel_type=official_tunnel_data["tunnel_type"],
+            local_port=official_tunnel_data["local_port"],
+            public_hostname=official_tunnel_data["public_hostname"],
+            websocket=websocket
+        )
 
-        # for tcp tunnels, we need to start a dedicated listener on the assigned port
-        if tunnel_type in ["tcp", "udp"]:
-            try:
-                # extract port from url like "tcp://hostname:8201"
-                port = int(public_url.split(":")[-1])  # get the last part after splitting on ":"
-                print(f"info:     extracted port {port} from public_url: {public_url}")
-                # start the listener as a background task
-                tcp_task = asyncio.create_task(start_tcp_listener(tunnel_id, port))
-                # store the task so we can cancel it later if the client disconnects
-                connection.tcp_server_task = tcp_task
-            except (ValueError, IndexError):
-                await websocket.close(code=1011, reason="invalid public url format for tcp tunnel")
+        # 6. send activation success response
+        await websocket.send_json({"status": "success", "message": "tunnel activated successfully"})
+        print(f"info:     tunnel {tunnel_id} activated successfully")
+
+        # 7. handle the tunnel traffic based on type
+        if official_tunnel_data["tunnel_type"] in ["http", "https"]:
+            # for http/https tunnels, we use the proxy router
+            await proxy_router.handle_http_tunnel(connection)
+        elif official_tunnel_data["tunnel_type"] in ["tcp", "udp"]:
+            # for tcp/udp tunnels, we start a dedicated port listener
+            assigned_port = official_tunnel_data.get("assigned_port")
+            if not assigned_port:
+                print(f"error:    no assigned port for TCP/UDP tunnel {tunnel_id}")
+                await websocket.close(code=1011, reason="no assigned port for TCP/UDP tunnel")
                 return
+            
+            print(f"info:     starting {official_tunnel_data['tunnel_type']} listener on port {assigned_port}")
+            await start_tcp_listener(assigned_port, connection)
 
-        # send activation success response to client
-        await websocket.send_text(json.dumps({"status": "success", "message": "tunnel activated"}))
-
-        # notify main server that tunnel is now active
-        try:
-            requests.post(
-                f"{config.MAIN_SERVER_URL}/internal/tunnels/{tunnel_id}/activate",
-                json={"node_secret_id": NODE_SECRET_ID},
-                timeout=3
-            )
-            print(f"info:     notified main server that tunnel {tunnel_id[:8]} is active")
-        except requests.RequestException as e:
-            print(f"warn:     failed to notify main server of activation: {e}")
-
-        while True:
-            # this loop keeps the client connection alive and is where
-            # data forwarding from client -> public happens.
-            print(f"debug:    waiting for data from client websocket...")
-            data = await websocket.receive_bytes()
-            print(f"debug:    received {len(data)} bytes from client websocket")
-            # if it's an http tunnel, forward the response to the http proxy's response queue.
-            if tunnel_type in ["http", "https"]:
-                print(f"debug:    forwarding http response to proxy queue")
-                await manager.forward_to_proxy(tunnel_id, data)
-            # if it's a tcp tunnel, forward it to the tcp proxy's response queue.
-            elif tunnel_type in ["tcp", "udp"]:
-                print(f"debug:    forwarding tcp response to proxy queue")
-                await manager.forward_to_proxy(tunnel_id, data)
-
-    except WebSocketDisconnect as e:
-        print(f"info:     websocket disconnected cleanly (code: {e.code}, reason: {e.reason})")
+    except WebSocketDisconnect:
+        print(f"info:     client disconnected from tunnel {tunnel_id}")
     except Exception as e:
-        print(f"error:    an unexpected error occurred in websocket: {type(e).__name__} - {e}")
+        print(f"error:    unexpected error in websocket endpoint: {e}")
+        try:
+            await websocket.close(code=1011, reason="internal server error")
+        except:
+            pass
     finally:
-        # immediate cleanup when client disconnects
-        if connection and tunnel_id:
-            print(f"info:     starting immediate cleanup for tunnel {tunnel_id[:8]}")
-            
-            # log tunnel deactivation
-            network_logger.log_event(NetworkEvent(
-                timestamp=time.time(),
-                event_type=NetworkEventType.TUNNEL_DEACTIVATE,
-                tunnel_id=tunnel_id,
-                metadata={
-                    "duration": time.time() - connection.connected_at if connection else 0
-                }
-            ))
-            
-            manager.disconnect(connection.tunnel_id)
-            
-            # notify main server immediately about deactivation
-            try:
-                deactivation_payload = {"node_secret_id": NODE_SECRET_ID}
-                response = requests.post(
-                    f"{config.MAIN_SERVER_URL}/internal/tunnels/{tunnel_id}/deactivate",
-                    json=deactivation_payload,
-                    timeout=3
-                )
-                if response.ok:
-                    print(f"info:     notified main server that tunnel {tunnel_id[:8]} is deactivated")
-                else:
-                    print(f"warn:     main server returned {response.status_code} for deactivation")
-            except requests.RequestException as e:
-                print(f"error:    failed to report deactivation for {tunnel_id[:8]}: {e}")
-        else:
-            print("info:     client disconnected before activating a tunnel.")
-        
-        print(f"info:     /ws/connect endpoint exited, cleanup complete.")
+        # cleanup: remove the connection from our manager
+        if connection:
+            await manager.remove_tunnel_connection(tunnel_id)
+            print(f"info:     cleaned up tunnel connection {tunnel_id}")
 
 def get_node_cert() -> str:
-    """get node certificate from file"""
+    """retrieves the node's certificate token for authentication"""
     try:
         with open("node_cert.txt", "r") as f:
             return f.read().strip()
@@ -552,29 +486,27 @@ def get_node_cert() -> str:
 
 @app.get("/internal/health")
 async def health_check():
-    """A simple health check endpoint for the node itself."""
-    return {"status": "ok", "timestamp": time.time()}
+    return {"status": "ok", "node_secret_id": NODE_SECRET_ID}
 
 @app.get("/.well-known/acme-challenge/{token}")
 async def handle_acme_challenge(token: str):
     """
-    An endpoint to solve the HTTP-01 challenge from Let's Encrypt.
-    Certbot will place a file in our challenge directory, and this
-    endpoint will serve it, allowing for automated SSL certificate issuance.
+    Serves ACME challenge files for Let's Encrypt certificate validation.
     """
     challenge_file_path = os.path.join(ACME_CHALLENGE_DIR, token)
     
-    print(f"debug:    ACME challenge received for token: {token}")
-    print(f"debug:    Looking for file at: {challenge_file_path}")
-
-    if os.path.exists(challenge_file_path) and os.path.isfile(challenge_file_path):
-        with open(challenge_file_path, "r") as f:
-            content = f.read()
-            print(f"debug:    Found challenge file, serving content.")
-            return PlainTextResponse(content)
+    if not os.path.exists(challenge_file_path):
+        print(f"warn:     ACME challenge file not found: {challenge_file_path}")
+        raise HTTPException(status_code=404, detail="Challenge file not found")
     
-    print(f"error:    Challenge token not found for token: {token}")
-    return PlainTextResponse("Challenge token not found.", status_code=404)
+    try:
+        with open(challenge_file_path, 'r') as f:
+            content = f.read().strip()
+        print(f"info:     served ACME challenge for token: {token}")
+        return PlainTextResponse(content=content)
+    except Exception as e:
+        print(f"error:    failed to read ACME challenge file {challenge_file_path}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read challenge file")
 
-# include the new proxy router. this must be last.
-app.include_router(proxy_router)
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8201)

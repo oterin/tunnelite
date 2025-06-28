@@ -5,6 +5,7 @@ import ssl
 import sys
 import uuid
 import time
+import socket
 from multiprocessing import Process, cpu_count
 from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from urllib.parse import urlparse, urlunparse
@@ -24,9 +25,19 @@ from server import config as common_config
 
 # read the main server url from config
 RAW_MAIN_SERVER_URL = common_config.get("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
+MAIN_SERVER_URL = RAW_MAIN_SERVER_URL
 
 # admin key for registration
 ADMIN_API_KEY = common_config.get("TUNNELITE_ADMIN_KEY")
+
+# constants for the node
+SECRET_ID_FILE = "node_secret_id.txt"
+BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb
+CERT_TOKEN_FILE = "node_cert.txt"
+KEY_FILE = None  # will be set dynamically
+CERT_FILE = None  # will be set dynamically
+DROP_TO_USER = None  # optional privilege dropping
+DROP_TO_GROUP = None  # optional privilege dropping
 
 async def get_public_ip():
     """Uses a third-party service to determine the node's public IP address."""
@@ -242,8 +253,14 @@ def run_reverse_benchmark():
 
 async def run_interactive_registration(node_secret_id: str):
     """the main interactive registration coroutine."""
+    # get public ip dynamically
+    public_ip = await get_public_ip()
+    if not public_ip:
+        print("error:    could not determine public ip for registration")
+        return False
+        
     # for registration, we'll use a default port that gets updated later
-    temp_public_address = f"http://{PUBLIC_IP}:8201"
+    temp_public_address = f"http://{public_ip}:8201"
     print(f"info:     using temporary address for registration: {temp_public_address}")
 
     # before registering, we must send a heartbeat so the server knows our address
@@ -319,7 +336,7 @@ async def run_interactive_registration(node_secret_id: str):
                         
                         if response.status_code == 200:
                             print(f"[client] challenge listener set up on port {port}.")
-                        await websocket.send(json.dumps({"type": "ready_for_challenge"}))
+                            await websocket.send(json.dumps({"type": "ready_for_challenge"}))
                         else:
                             print(f"[client] error: challenge setup failed with status {response.status_code}: {response.text}")
                             return False
