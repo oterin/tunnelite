@@ -131,7 +131,7 @@ async def verify_tunnel_activation(
     """
     # 1. authenticate the node
     node = database.get_node_by_secret_id(x_node_secret_id)
-    if not node or node.get("status") != "active":
+    if not node or node.get("status") not in ["active", "approved"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="node not authorized or not active."
