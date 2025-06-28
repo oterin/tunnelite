@@ -169,8 +169,17 @@ async def update_node_ip(
             raise HTTPException(status_code=500, detail="Failed to update DNS record via provider.")
 
         # Also update the IP in our own database for record-keeping
+        node_secret_id = node["node_secret_id"]
         port = node.get("port", 443)
-        database.update_node_public_address(node["node_secret_id"], f"https://{hostname}:{port}")
+        updated_public_address = f"https://{hostname}:{port}"
+        
+        # Update the node record with the new public address
+        node_update = {
+            "node_secret_id": node_secret_id,
+            "public_address": updated_public_address,
+            "verified_ip_address": ip_address
+        }
+        database.upsert_node(node_update)
 
         return {"status": "success", "hostname": hostname, "ip_address": ip_address}
 
