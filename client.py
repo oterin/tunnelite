@@ -288,14 +288,20 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
             uptime = time.time() - start_time if start_time else 0
             uptime_str = f"{int(uptime//3600):02d}:{int((uptime%3600)//60):02d}:{int(uptime%60):02d}"
             
-            stats_text = (
-                f"[bold]tunnelite[/bold] [dim]│[/dim] "
-                f"{tunnel_type.upper()} [dim]│[/dim] "
-                f":{local_port} [dim]│[/dim] "
-                f"{uptime_str} [dim]│[/dim] "
-                f"{request_count} reqs [dim]│[/dim] "
-                f"↓{format_bytes(bytes_in)} ↑{format_bytes(bytes_out)}"
-            )
+            stats_items = [
+                f"[bold]tunnelite[/bold]",
+                f"{tunnel_type.upper()}",
+                f":{local_port}",
+                f"{uptime_str}"
+            ]
+            if tunnel_type in ["http", "https"]:
+                stats_items.append(f"{request_count} reqs")
+            
+            stats_items.extend([
+                f"↓{format_bytes(bytes_in)}",
+                f"↑{format_bytes(bytes_out)}"
+            ])
+            stats_text = " [dim]│[/dim] ".join(stats_items)
             
             header_content = Panel(
                 Align.center(stats_text),
@@ -471,7 +477,12 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                 # proxy loop with live updates and request logging
                 if tunnel_type in ["http", "https"]:
                     while True:
-                        request_from_node = await websocket.recv()
+                        try:
+                            request_from_node = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            live.update(make_layout("active", public_url))
+                            continue
+
                         request_data_bytes = request_from_node if isinstance(request_from_node, bytes) else request_from_node.encode('utf-8')
                         
                         # parse request for logging
@@ -566,7 +577,12 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
 
                     # main loop to receive data from the node's websocket
                     while True:
-                        message = await websocket.recv()
+                        try:
+                            message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            live.update(make_layout("active", public_url))
+                            continue
+
                         if not isinstance(message, bytes):
                             continue
                         
