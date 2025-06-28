@@ -497,121 +497,118 @@ def find_available_port_in_range(port_list):
     return None
 
 def run_background_service(updated_public_address: str):
-    """runs the background service (heartbeat and control channel) in a separate process"""
-    print(f"info:     background service starting (pid: {os.getpid()}) with address {updated_public_address}")
-    
-    # import the background tasks from tunnel_node
-    import asyncio
-    import requests
-    import time
-    import json
-    import websockets
-    
+    """
+    this service runs in a separate process and handles two things:
+    1. a periodic heartbeat to the main server.
+    2. a persistent websocket control channel connection.
+    """
+    # this function will run in its own process, so it needs to initialize its own config
+    from tunnel_node import config as t_config
+    t_config.initialize_from_json()
+
+    # also needs to init its own copy of the node cert
+    node_cert = get_node_cert()
+    node_secret_id = get_node_secret_id()
+
     async def background_heartbeat():
-        node_secret_id = get_node_secret_id()
-        node_cert = get_node_cert()
-        
+        """sends a heartbeat to the main server every 60 seconds."""
         while True:
-            await asyncio.sleep(60)  # heartbeat every minute
-            
-            # use the updated public address that reflects the actual running port
-            node_details = {
-                "node_secret_id": node_secret_id,
-                "public_address": updated_public_address,  # use the passed parameter
-                "metrics": {
-                    "cpu_percent": 0,  # simplified for background service
-                    "memory_percent": 0,
-                    "active_connections": 0
-                }
-            }
-            
+            await asyncio.sleep(60)
             try:
-                print(f"info:     ({time.ctime()}) sending heartbeat with address {updated_public_address}...")
-                
-                if node_cert:
-                    try:
-                        response = requests.post(
-                            f"{MAIN_SERVER_URL}/nodes/heartbeat",
-                            json=node_details,
-                            headers={"x-node-cert": node_cert}
-                        )
-                    except requests.RequestException:
-                        response = requests.post(
-                            f"{MAIN_SERVER_URL}/nodes/register",
-                            json=node_details
-                        )
-                else:
-                    response = requests.post(
-                        f"{MAIN_SERVER_URL}/nodes/register",
-                        json=node_details
-                    )
-                    
+                print(f"info:     ({time.ctime()}) sending heartbeat...")
+                headers = {"x-api-key": node_secret_id}
+                payload = {"public_address": updated_public_address, "node_cert": node_cert}
+                response = requests.post(
+                    f"{MAIN_SERVER_URL}/nodes/heartbeat",
+                    headers=headers,
+                    json=payload,
+                    timeout=15,
+                )
                 response.raise_for_status()
-                print(f"info:     heartbeat successful, server updated with address {updated_public_address}")
-                
+                print("info:     heartbeat successful.")
             except requests.RequestException as e:
                 print(f"error:    heartbeat failed: {e}")
 
-    async def background_control_channel():
-        retry_count = 0
-        max_retries = 5
-        
-        await asyncio.sleep(10)  # wait for things to settle
-        
-        while True:
-            try:
-                node_cert = get_node_cert()
-                ws_url = MAIN_SERVER_URL.replace("http", "ws", 1)
-                
-                if node_cert:
-                    token_preview = node_cert[:20] + "..." if len(node_cert) > 20 else node_cert
-                    control_uri = f"{ws_url}/ws/node-control-jwt?token={node_cert}"
-                    print(f"info:     connecting to JWT control channel with token {token_preview} (attempt {retry_count + 1})")
-                else:
-                    control_uri = f"{ws_url}/ws/node-control"
-                    print(f"info:     connecting to legacy control channel (attempt {retry_count + 1})")
-                    
-                async with websockets.connect(control_uri, ssl=True) as websocket:
-                    if not node_cert:
-                        auth_payload = {"type": "auth", "node_secret_id": get_node_secret_id()}
-                        await websocket.send(json.dumps(auth_payload))
-                        
-                    print("info:     background control channel connected successfully.")
-                    retry_count = 0
 
+    async def background_control_channel():
+        """maintains the persistent control channel to the server."""
+        ws_url = MAIN_SERVER_URL.replace("http", "ws")
+        
+        # NOTE: THIS IS THE WORKAROUND. The server expects an api_key.
+        control_uri = f"{ws_url}/internal/control/ws?api_key={node_secret_id}"
+        
+        attempts = 0
+        max_attempts = 5
+        base_wait_time = 10  # seconds
+
+        while attempts < max_attempts:
+            try:
+                print(f"info:     connecting to control channel... (attempt {attempts + 1})")
+                async with websockets.connect(control_uri) as websocket:
+                    print("info:     background control channel connected.")
+                    attempts = 0 # reset on successful connection
+
+                    # main loop: listen for commands from server
                     async for message in websocket:
                         try:
                             command = json.loads(message)
                             print(f"info:     received command: {command}")
+                            # command processing logic would go here
                         except json.JSONDecodeError:
                             print("error:    received malformed command from server.")
                         except Exception as e:
                             print(f"error:    error processing command: {e}")
-
+                    
+            except (websockets.exceptions.InvalidURI, websockets.exceptions.InvalidHandshake) as e:
+                # these are usually permanent errors
+                print(f"error:    background control channel failed: {e}. not retrying.")
+                break
             except Exception as e:
-                retry_count += 1
-                if retry_count <= max_retries:
-                    backoff_time = min(10 * retry_count, 60)
-                    print(f"warn:     background control channel failed: {e}. retrying in {backoff_time}s... (attempt {retry_count}/{max_retries})")
-                    await asyncio.sleep(backoff_time)
-                else:
-                    print(f"warn:     background control channel failed after {max_retries} attempts. giving up for 5 minutes.")
-                    await asyncio.sleep(300)
-                    retry_count = 0
+                attempts += 1
+                wait_time = base_wait_time * (2 ** (attempts - 1))
+                print(f"warn:     background control channel failed: {e}. retrying in {wait_time}s... (attempt {attempts}/{max_attempts})")
+                await asyncio.sleep(wait_time)
 
     async def main():
+        print(f"info:     background service starting (pid: {os.getpid()}) with address {updated_public_address}")
+        # run heartbeat and control channel concurrently
         await asyncio.gather(
             background_heartbeat(),
             background_control_channel()
         )
-    
-    # run the background service
+
+    # run the async main function
     asyncio.run(main())
 
-# --- main entrypoint ---
+
+async def main():
+    """main entry point."""
+    if os.geteuid() != 0:
+        print("error:    this script must be run as root to bind to low ports and run certbot.")
+        # sys.exit(1) # commented for dev
+
+    # check if we're already a registered node
+    node_cert = get_node_cert()
+    if node_cert:
+        print("info:     node certificate found, proceeding with production startup...")
+        await main_startup_flow()
+    else:
+        print("info:     node certificate not found, starting registration process...")
+        node_secret_id = get_node_secret_id()
+        asyncio.run(run_interactive_registration(node_secret_id))
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_startup_flow())
-    except KeyboardInterrupt:
-        print("\ninfo:     Shutting down node.")
+    # configure python path to run this script from anywhere
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    # global config setup
+    config.initialize_from_json()
+
+    # set user/group for privilege drop if specified
+    DROP_TO_USER = config.get("DROP_TO_USER")
+    DROP_TO_GROUP = config.get("DROP_TO_GROUP")
+
+    asyncio.run(main())

@@ -173,25 +173,13 @@ async def node_control_channel_task():
 
     while True:
         try:
-            node_cert = get_node_cert()
             ws_url = config.MAIN_SERVER_URL.replace("http", "ws", 1)
             
-            # use jwt endpoint if we have a cert
-            if node_cert:
-                # truncate token for logging (show first 20 chars)
-                token_preview = node_cert[:20] + "..." if len(node_cert) > 20 else node_cert
-                control_uri = f"{ws_url}/ws/node-control-jwt?token={node_cert}"
-                print(f"info:     connecting to JWT control channel with token {token_preview} (attempt {retry_count + 1})")
-            else:
-                control_uri = f"{ws_url}/ws/node-control"
-                print(f"info:     connecting to legacy control channel (attempt {retry_count + 1})")
+            # WORKAROUND: connect to the api_key endpoint the server expects
+            control_uri = f"{ws_url}/internal/control/ws?api_key={NODE_SECRET_ID}"
+            print(f"info:     connecting to control channel (attempt {retry_count + 1})")
                 
             async with websockets.connect(control_uri, ssl=True) as websocket:
-                # only send auth message for legacy endpoint
-                if not node_cert:
-                    auth_payload = {"type": "auth", "node_secret_id": NODE_SECRET_ID}
-                    await websocket.send(json.dumps(auth_payload))
-                    
                 print("info:     node control channel connected successfully.")
                 retry_count = 0  # reset retry count on successful connection
 

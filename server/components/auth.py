@@ -1,7 +1,7 @@
 import secrets
 from typing import Dict
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.security import APIKeyHeader, OAuth2PasswordRequestForm
 
 from server.ratelimit import limiter
@@ -14,6 +14,10 @@ from pydantic import BaseModel
 
 from server.components import database
 from server.components.models import *
+
+from server.config import get as get_config
+
+import jwt
 
 # configuration
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -68,6 +72,37 @@ async def get_node_from_api_key(request: Request) -> Dict:
         )
 
     return node
+
+async def get_node_from_token(
+    websocket: WebSocket,
+    token: str = Query(None)
+) -> Dict:
+    """authenticate a node via jwt in query param"""
+    if token is None:
+        raise WebSocketDisconnect(code=1008, reason="token not provided")
+
+    try:
+        payload = jwt.decode(
+            token,
+            get_config("JWT_SECRET"),
+            algorithms=["HS256"]
+        )
+        node_secret_id = payload.get("sub")
+        if node_secret_id is None:
+            raise WebSocketDisconnect(code=1008, reason="invalid token")
+
+        # check role
+        if payload.get("role") != "node":
+            raise WebSocketDisconnect(code=1008, reason="invalid role")
+
+        node = database.get_node_by_secret_id(node_secret_id)
+        if not node:
+            raise WebSocketDisconnect(code=1008, reason="node not found")
+
+        return node
+
+    except jwt.PyJWTError as e:
+        raise WebSocketDisconnect(code=1008, reason=f"invalid token: {e}")
 
 # api endpoints
 @router.post("/register", status_code=status.HTTP_201_CREATED)

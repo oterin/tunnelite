@@ -5,3 +5,8 @@ websockets
 random-word
 slowapi
 python_json_logger
+uvicorn
+python-dotenv
+bcrypt
+tinydb
+pyjwt
