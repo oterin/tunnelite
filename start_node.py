@@ -149,7 +149,7 @@ async def main_startup_flow():
     # 1. Get this node's details from the server
     node_record = await get_self_node_record()
     if not node_record:
-        print("critical: Cannot start without node record. Exiting.")
+        print("critical: Cannot start without node record. This should not happen after registration.")
         return
 
     hostname = node_record.get("public_hostname")
