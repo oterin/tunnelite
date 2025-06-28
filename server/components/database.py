@@ -1,23 +1,85 @@
-
-
 import json
 import os
 import time
 from typing import Dict, Optional, List
-from filelock import FileLock # --- NEW ---
+from filelock import FileLock
 
-# cry harder im not using sqlite3
-# nor postgres nor any other db shut up
 USER_DB_FILE = "users.jsonl"
 TUNNEL_DB_FILE = "tunnels.jsonl"
 NODE_DB_FILE = "nodes.jsonl"
 TELEMETRY_DB_FILE = "telemetry.jsonl"
 TUNNEL_EVENTS_DB_FILE = "tunnel_events.jsonl"
+BANS_DB_FILE = "bans.jsonl"
 
 def _ensure_db_file_exists(db_file: str):
     if not os.path.exists(db_file):
         with open(db_file, "w") as f:
             pass
+
+def get_value(key: str, default=None):
+    _ensure_db_file_exists(BANS_DB_FILE)
+    lock = FileLock(f"{BANS_DB_FILE}.lock")
+    with lock:
+        with open(BANS_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    if record.get("key") == key:
+                        return record.get("value", default)
+    return default
+
+def set_value(key: str, value):
+    _ensure_db_file_exists(BANS_DB_FILE)
+    records = []
+    found = False
+    lock = FileLock(f"{BANS_DB_FILE}.lock")
+    with lock:
+        with open(BANS_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    if record.get("key") == key:
+                        records.append({"key": key, "value": value, "timestamp": time.time()})
+                        found = True
+                    else:
+                        records.append(record)
+        
+        if not found:
+            records.append({"key": key, "value": value, "timestamp": time.time()})
+        
+        with open(BANS_DB_FILE, "w") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+
+def delete_key(key: str):
+    _ensure_db_file_exists(BANS_DB_FILE)
+    records = []
+    lock = FileLock(f"{BANS_DB_FILE}.lock")
+    with lock:
+        with open(BANS_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    if record.get("key") != key:
+                        records.append(record)
+        
+        with open(BANS_DB_FILE, "w") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+
+def list_keys(prefix: str = "") -> List[str]:
+    _ensure_db_file_exists(BANS_DB_FILE)
+    keys = []
+    lock = FileLock(f"{BANS_DB_FILE}.lock")
+    with lock:
+        with open(BANS_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    key = record.get("key", "")
+                    if key.startswith(prefix):
+                        keys.append(key)
+    return keys
 
 def find_user_by_username(username: str) -> Optional[Dict]:
     _ensure_db_file_exists(USER_DB_FILE)
@@ -84,6 +146,52 @@ def get_tunnels_by_username(username: str) -> List[Dict]:
                     tunnel_data = json.loads(line)
                     if tunnel_data.get("owner_username") == username:
                         tunnels.append(tunnel_data)
+    return tunnels
+
+def get_tunnel_by_id(tunnel_id: str) -> Optional[Dict]:
+    _ensure_db_file_exists(TUNNEL_DB_FILE)
+    lock = FileLock(f"{TUNNEL_DB_FILE}.lock")
+    with lock:
+        with open(TUNNEL_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    tunnel = json.loads(line)
+                    if tunnel.get("tunnel_id") == tunnel_id:
+                        return tunnel
+    return None
+
+def update_tunnel_status(tunnel_id: str, status: str) -> bool:
+    _ensure_db_file_exists(TUNNEL_DB_FILE)
+    tunnels = []
+    updated = False
+    lock = FileLock(f"{TUNNEL_DB_FILE}.lock")
+    with lock:
+        with open(TUNNEL_DB_FILE, 'r') as f:
+            for line in f:
+                if line.strip():
+                    tunnels.append(json.loads(line))
+
+        for i, tunnel in enumerate(tunnels):
+            if tunnel.get("tunnel_id") == tunnel_id:
+                tunnels[i]["status"] = status
+                updated = True
+                break
+
+        if updated:
+            with open(TUNNEL_DB_FILE, 'w') as f:
+                for tunnel in tunnels:
+                    f.write(json.dumps(tunnel) + '\n')
+    return updated
+
+def get_all_tunnels() -> List[Dict]:
+    _ensure_db_file_exists(TUNNEL_DB_FILE)
+    tunnels = []
+    lock = FileLock(f"{TUNNEL_DB_FILE}.lock")
+    with lock:
+        with open(TUNNEL_DB_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    tunnels.append(json.loads(line))
     return tunnels
 
 def upsert_node(node_data: Dict):
@@ -185,7 +293,7 @@ def get_all_nodes(locked: bool = False) -> List[Dict]:
             return _read_nodes()
 
 def get_active_nodes() -> List[Dict]:
-    all_nodes = get_all_nodes() # this will acquire its own lock if not already locked
+    all_nodes = get_all_nodes()
     active_nodes = []
 
     # if the node didnt report that it is active in 2 minutes, it is dead
@@ -200,71 +308,19 @@ def get_active_nodes() -> List[Dict]:
 
     return active_nodes
 
-def get_tunnel_by_id(tunnel_id: str) -> Optional[Dict]:
-    _ensure_db_file_exists(TUNNEL_DB_FILE)
-    lock = FileLock(f"{TUNNEL_DB_FILE}.lock")
-    with lock:
-        with open(TUNNEL_DB_FILE, 'r') as f:
-            for line in f:
-                if line.strip():
-                    tunnel_data = json.loads(line)
-                    if tunnel_data.get("tunnel_id") == tunnel_id:
-                        return tunnel_data
-    return None
-
-def update_tunnel_status(tunnel_id: str, status: str) -> bool:
-    _ensure_db_file_exists(TUNNEL_DB_FILE)
-    tunnels = []
-    updated = False
-    lock = FileLock(f"{TUNNEL_DB_FILE}.lock")
-    with lock:
-        with open(TUNNEL_DB_FILE, 'r') as f:
-            for line in f:
-                if line.strip():
-                    tunnels.append(json.loads(line))
-
-        for i, tunnel in enumerate(tunnels):
-            if tunnel.get("tunnel_id") == tunnel_id:
-                tunnels[i]["status"] = status
-                updated = True
-                break
-
-        if updated:
-            with open(TUNNEL_DB_FILE, 'w') as f:
-                for tunnel in tunnels:
-                    f.write(json.dumps(tunnel) + '\n')
-    return updated
-
-def get_all_tunnels() -> List[Dict]:
-    _ensure_db_file_exists(TUNNEL_DB_FILE)
-    tunnels = []
-    lock = FileLock(f"{TUNNEL_DB_FILE}.lock")
-    with lock:
-        with open(TUNNEL_DB_FILE, "r") as f:
-            for line in f:
-                if line.strip():
-                    tunnels.append(json.loads(line))
-    return tunnels
-
-# --- telemetry functions ---
-
 def store_telemetry(telemetry_record: Dict) -> None:
-    """store telemetry data with automatic cleanup of old records"""
     _ensure_db_file_exists(TELEMETRY_DB_FILE)
     lock = FileLock(f"{TELEMETRY_DB_FILE}.lock")
     with lock:
-        # add timestamp if not present
         if "timestamp" not in telemetry_record:
             telemetry_record["timestamp"] = time.time()
         
-        # append new record
         with open(TELEMETRY_DB_FILE, 'a') as f:
             f.write(json.dumps(telemetry_record) + '\n')
 
 def get_telemetry_for_node(node_secret_id: str, since_timestamp: float) -> List[Dict]:
-    """get telemetry data for a specific node since timestamp"""
     _ensure_db_file_exists(TELEMETRY_DB_FILE)
-    telemetry = []
+    telemetry_records = []
     lock = FileLock(f"{TELEMETRY_DB_FILE}.lock")
     with lock:
         with open(TELEMETRY_DB_FILE, 'r') as f:
@@ -273,15 +329,13 @@ def get_telemetry_for_node(node_secret_id: str, since_timestamp: float) -> List[
                     record = json.loads(line)
                     if (record.get("node_secret_id") == node_secret_id and 
                         record.get("timestamp", 0) >= since_timestamp):
-                        telemetry.append(record)
-    return telemetry
+                        telemetry_records.append(record)
+    return telemetry_records
 
 def get_latest_telemetry_for_node(node_secret_id: str) -> Optional[Dict]:
-    """get the most recent telemetry record for a node"""
     _ensure_db_file_exists(TELEMETRY_DB_FILE)
     latest_record = None
     latest_timestamp = 0
-    
     lock = FileLock(f"{TELEMETRY_DB_FILE}.lock")
     with lock:
         with open(TELEMETRY_DB_FILE, 'r') as f:
@@ -296,20 +350,16 @@ def get_latest_telemetry_for_node(node_secret_id: str) -> Optional[Dict]:
     return latest_record
 
 def store_tunnel_event(event_record: Dict) -> None:
-    """store tunnel event data"""
     _ensure_db_file_exists(TUNNEL_EVENTS_DB_FILE)
     lock = FileLock(f"{TUNNEL_EVENTS_DB_FILE}.lock")
     with lock:
-        # add timestamp if not present
         if "timestamp" not in event_record:
             event_record["timestamp"] = time.time()
         
-        # append new event
         with open(TUNNEL_EVENTS_DB_FILE, 'a') as f:
             f.write(json.dumps(event_record) + '\n')
 
 def get_tunnel_events_for_node(node_secret_id: str, since_timestamp: float, event_type: Optional[str] = None) -> List[Dict]:
-    """get tunnel events for a specific node since timestamp"""
     _ensure_db_file_exists(TUNNEL_EVENTS_DB_FILE)
     events = []
     lock = FileLock(f"{TUNNEL_EVENTS_DB_FILE}.lock")
@@ -325,7 +375,6 @@ def get_tunnel_events_for_node(node_secret_id: str, since_timestamp: float, even
     return events
 
 def count_tunnel_events_for_node(node_secret_id: str, since_timestamp: float) -> int:
-    """count tunnel events for a node since timestamp"""
     _ensure_db_file_exists(TUNNEL_EVENTS_DB_FILE)
     count = 0
     lock = FileLock(f"{TUNNEL_EVENTS_DB_FILE}.lock")
@@ -340,7 +389,6 @@ def count_tunnel_events_for_node(node_secret_id: str, since_timestamp: float) ->
     return count
 
 def get_nodes_by_owner(username: str) -> List[Dict]:
-    """get all nodes owned by a specific user"""
     _ensure_db_file_exists(NODE_DB_FILE)
     nodes = []
     lock = FileLock(f"{NODE_DB_FILE}.lock")
@@ -352,3 +400,11 @@ def get_nodes_by_owner(username: str) -> List[Dict]:
                     if node.get("owner_username") == username:
                         nodes.append(node)
     return nodes
+
+def initialize_database():
+    _ensure_db_file_exists(USER_DB_FILE)
+    _ensure_db_file_exists(TUNNEL_DB_FILE)
+    _ensure_db_file_exists(NODE_DB_FILE)
+    _ensure_db_file_exists(TELEMETRY_DB_FILE)
+    _ensure_db_file_exists(TUNNEL_EVENTS_DB_FILE)
+    _ensure_db_file_exists(BANS_DB_FILE)

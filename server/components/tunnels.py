@@ -14,6 +14,7 @@ from server.components import database
 from server.components.models import *
 from server.components.auth import get_current_user
 from server.components.node_control import node_manager
+from server.components.bans import check_ban, get_client_ip
 
 router = APIRouter(prefix="/tunnels", tags=["tunnels"])
 
@@ -180,6 +181,21 @@ async def create_tunnel(
     current_user: dict = Depends(get_current_user),
 ):
     username = current_user.get("username")
+
+    # check for bans first
+    client_ip = get_client_ip(request)
+    ban_check = check_ban(
+        ip_address=client_ip,
+        username=username,
+        user_id=current_user.get("user_id")
+    )
+    
+    if ban_check.is_banned:
+        if ban_check.ban_scope.value in ["service", "tunnel"]:
+            raise HTTPException(
+                status_code=403, 
+                detail=f"access denied - {ban_check.ban_type.value}: {ban_check.reason}"
+            )
 
     # 1. find the best node for the user
     preferred_country = get_country_code_from_ip(request.client.host) # type: ignore

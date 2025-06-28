@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tunnelite node manager - beautiful tui for node setup and management
+tunnelite node manager - minimalistic tui for node setup and management
 """
 
 import asyncio
@@ -54,28 +54,57 @@ app = typer.Typer(
     add_completion=False,
 )
 
-# telemetry collection
-telemetry_data = {
-    "system": {},
-    "network": {},
-    "tunnels": {
+# global node state for metrics and logging
+node_state = {
+    "start_time": None,
+    "activity_log": [],
+    "bandwidth_history": [],
+    "tunnel_stats": {
         "active_tunnels": 0,
-        "total_tunnels_served": 0,
-        "http_requests_count": 0,
-        "tcp_connections_count": 0,
+        "total_requests": 0,
         "data_transferred_mb": 0.0,
-        "average_response_time_ms": 0.0,
-        "error_rate_percent": 0.0
+        "active_connections": 0
+    },
+    "ban_stats": {
+        "total_bans": 0,
+        "active_bans": 0,
+        "recent_kicks": 0
     }
 }
+
+def add_activity_log(level: str, action: str, details: str = ""):
+    """add timestamped activity entry"""
+    global node_state
+    timestamp = time.strftime("%H:%M:%S")
+    entry = {"timestamp": timestamp, "level": level, "action": action, "details": details}
+    node_state["activity_log"].append(entry)
+    if len(node_state["activity_log"]) > 50:  # keep last 50 entries
+        node_state["activity_log"].pop(0)
+
+def format_bytes(bytes_val):
+    """format bytes in human readable format"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes_val < 1024.0:
+            return f"{bytes_val:.1f}{unit}"
+        bytes_val /= 1024.0
+    return f"{bytes_val:.1f}TB"
+
+def format_uptime(seconds):
+    """format uptime in human readable format"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours:02d}:{minutes:02d}:{int(seconds % 60):02d}"
 
 def collect_system_metrics() -> Dict:
     """collect comprehensive system metrics"""
     try:
         # cpu and memory
-        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_percent = psutil.cpu_percent(interval=0.1)
         memory = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
+        
+        # network io
+        net_io = psutil.net_io_counters()
         
         # load average (unix only)
         load_avg = [0.0, 0.0, 0.0]
@@ -85,6 +114,27 @@ def collect_system_metrics() -> Dict:
         # uptime
         boot_time = psutil.boot_time()
         uptime = time.time() - boot_time
+        
+        # calculate bandwidth usage
+        current_time = time.time()
+        bandwidth_mbps = 0.0
+        
+        if node_state["bandwidth_history"]:
+            last_entry = node_state["bandwidth_history"][-1]
+            time_diff = current_time - last_entry["timestamp"]
+            if time_diff > 0:
+                bytes_diff = (net_io.bytes_sent + net_io.bytes_recv) - last_entry["total_bytes"]
+                bandwidth_mbps = (bytes_diff * 8) / (time_diff * 1024 * 1024)  # convert to mbps
+        
+        # store bandwidth history
+        node_state["bandwidth_history"].append({
+            "timestamp": current_time,
+            "total_bytes": net_io.bytes_sent + net_io.bytes_recv
+        })
+        
+        # keep only last 60 entries (1 minute of history)
+        if len(node_state["bandwidth_history"]) > 60:
+            node_state["bandwidth_history"].pop(0)
         
         return {
             "cpu_usage_percent": cpu_percent,
@@ -97,29 +147,12 @@ def collect_system_metrics() -> Dict:
             "load_average_1m": load_avg[0],
             "load_average_5m": load_avg[1],
             "load_average_15m": load_avg[2],
-            "uptime_seconds": int(uptime)
+            "uptime_seconds": int(uptime),
+            "bandwidth_mbps": bandwidth_mbps,
+            "connections_count": len(psutil.net_connections())
         }
     except Exception as e:
         console.print(f"[dim]warning: could not collect system metrics: {e}[/dim]")
-        return {}
-
-def collect_network_metrics() -> Dict:
-    """collect network metrics"""
-    try:
-        net_io = psutil.net_io_counters()
-        connections = len(psutil.net_connections())
-        
-        return {
-            "bytes_sent": net_io.bytes_sent,
-            "bytes_received": net_io.bytes_recv,
-            "packets_sent": net_io.packets_sent,
-            "packets_received": net_io.packets_recv,
-            "connections_active": connections,
-            "connections_total": connections,
-            "bandwidth_usage_mbps": 0.0  # calculated over time
-        }
-    except Exception as e:
-        console.print(f"[dim]warning: could not collect network metrics: {e}[/dim]")
         return {}
 
 async def send_telemetry():
@@ -131,15 +164,12 @@ async def send_telemetry():
         
         # collect current metrics
         system_metrics = collect_system_metrics()
-        network_metrics = collect_network_metrics()
-        
-        if not system_metrics or not network_metrics:
+        if not system_metrics:
             return
         
         telemetry_payload = {
             "system": system_metrics,
-            "network": network_metrics,
-            "tunnels": telemetry_data["tunnels"],
+            "tunnels": node_state["tunnels"],
             "timestamp": time.time(),
             "node_version": "1.0.0"
         }
@@ -158,14 +188,14 @@ async def send_telemetry():
         pass
 
 def get_user_api_key() -> Optional[str]:
-    """get user api key from config"""
+    """get user api key from config file"""
     if not os.path.exists(api_key_file):
         return None
     with open(api_key_file, "r") as f:
         return f.read().strip()
 
 def save_user_api_key(api_key: str):
-    """save user api key to config"""
+    """save user api key to config file"""
     os.makedirs(config_dir, exist_ok=True)
     with open(api_key_file, "w") as f:
         f.write(api_key)
@@ -188,7 +218,7 @@ def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def show_header():
-    """show centered header"""
+    """show minimalistic centered header"""
     header_text = Text()
     header_text.append("tunnelite", style="bold")
     header_text.append(" / ", style="dim")
@@ -203,7 +233,6 @@ def show_auth_status():
     """show authentication status"""
     api_key = get_user_api_key()
     if api_key:
-        # verify api key with server
         try:
             response = requests.get(f"{MAIN_SERVER_URL}/auth/users/me", 
                                   headers={"x-api-key": api_key}, timeout=5)
@@ -219,7 +248,7 @@ def show_auth_status():
     console.print()
 
 def show_node_status():
-    """show current node status"""
+    """show node status with key metrics"""
     node_secret_id = get_node_secret_id()
     
     try:
@@ -229,32 +258,344 @@ def show_node_status():
         if response.status_code == 200:
             node_data = response.json()
             
-            # create status table
+            # create simple status table
             table = Table(box=box.SIMPLE, show_header=False)
-            table.add_column("property", style="dim")
-            table.add_column("value")
+            table.add_column("key", style="dim", width=15)
+            table.add_column("value", width=25)
             
-            status_icon = "●" if node_data.get("status") == "active" else "○"
-            table.add_row("status", f"{status_icon} {node_data.get('status', 'unknown')}")
-            table.add_row("hostname", node_data.get("public_hostname", "not assigned"))
-            table.add_row("location", node_data.get("verified_geolocation", {}).get("city", "unknown"))
-            table.add_row("port range", node_data.get("port_range", "not configured"))
-            table.add_row("max clients", str(node_data.get("max_clients", 0)))
+            # basic info
+            status = node_data.get("status", "unknown")
+            hostname = node_data.get("public_hostname", "not assigned")
+            location_data = node_data.get("verified_geolocation", {})
+            location = f"{location_data.get('city', 'unknown')}, {location_data.get('countryCode', 'XX')}"
             
-            # system metrics if available
-            if node_data.get("cpu_usage") is not None:
-                table.add_row("cpu usage", f"{node_data.get('cpu_usage', 0):.1f}%")
-            if node_data.get("memory_usage") is not None:
-                table.add_row("memory usage", f"{node_data.get('memory_usage', 0):.1f}%")
-            if node_data.get("active_tunnels") is not None:
-                table.add_row("active tunnels", str(node_data.get("active_tunnels", 0)))
+            table.add_row("status", f"● {status}")
+            table.add_row("hostname", hostname)
+            table.add_row("location", location)
+            
+            # metrics if available
+            metrics = collect_system_metrics()
+            if metrics:
+                cpu_usage = metrics.get("cpu_usage_percent", 0)
+                memory_usage = metrics.get("memory_usage_percent", 0)
+                bandwidth = metrics.get("bandwidth_mbps", 0)
+                
+                table.add_row("cpu", f"{cpu_usage:.1f}%")
+                table.add_row("memory", f"{memory_usage:.1f}%")
+                table.add_row("bandwidth", f"{bandwidth:.2f} mbps")
+                
+                # tunnel stats
+                active_tunnels = node_state["tunnel_stats"]["active_tunnels"]
+                total_requests = node_state["tunnel_stats"]["total_requests"]
+                table.add_row("tunnels", f"{active_tunnels} active")
+                table.add_row("requests", str(total_requests))
+                
+                # ban stats
+                ban_stats = node_state["ban_stats"]
+                table.add_row("bans", f"{ban_stats['active_bans']} active")
             
             console.print(Align.center(table))
         else:
             console.print(Align.center("[dim]node not registered[/dim]"))
             
     except requests.RequestException:
-        console.print(Align.center("[dim]could not connect to server[/dim]"))
+        console.print(Align.center("[dim]connection error[/dim]"))
+    
+    console.print()
+
+def show_ban_management():
+    """show ban management interface for node owners"""
+    clear_screen()
+    show_header()
+    
+    console.print(Align.center("[bold]ban management[/bold]"))
+    console.print()
+    
+    # check if user is authenticated and owns the node
+    api_key = get_user_api_key()
+    node_secret_id = get_node_secret_id()
+    
+    if not api_key:
+        console.print(Align.center("[dim]please login first[/dim]"))
+        input("press enter to continue...")
+        return
+    
+    try:
+        # verify node ownership
+        headers = {"x-node-secret-id": node_secret_id}
+        response = requests.get(f"{MAIN_SERVER_URL}/nodes/me", headers=headers, timeout=5)
+        
+        if response.status_code != 200:
+            console.print(Align.center("[dim]node not registered[/dim]"))
+            input("press enter to continue...")
+            return
+        
+        node_data = response.json()
+        node_owner = node_data.get("owner_username")
+        
+        # get current user
+        user_response = requests.get(f"{MAIN_SERVER_URL}/auth/users/me", 
+                                   headers={"x-api-key": api_key}, timeout=5)
+        if user_response.status_code != 200:
+            console.print(Align.center("[dim]authentication error[/dim]"))
+            input("press enter to continue...")
+            return
+        
+        current_user = user_response.json().get("username")
+        
+        if current_user != node_owner:
+            console.print(Align.center("[dim]you don't own this node[/dim]"))
+            input("press enter to continue...")
+            return
+        
+        # show ban menu
+        menu_items = [
+            "1. view active bans",
+            "2. ban user from node", 
+            "3. tempban user",
+            "4. kick user",
+            "5. remove ban",
+            "6. back to main menu"
+        ]
+        
+        for item in menu_items:
+            console.print(Align.center(f"[dim]{item}[/dim]"))
+        
+        console.print()
+        choice = Prompt.ask("  choose option", choices=["1", "2", "3", "4", "5", "6"], console=console)
+        
+        if choice == "1":
+            show_active_bans(node_secret_id, api_key)
+        elif choice == "2":
+            create_node_ban(node_secret_id, api_key, "permban")
+        elif choice == "3":
+            create_node_ban(node_secret_id, api_key, "tempban")
+        elif choice == "4":
+            kick_user_from_node(node_secret_id, api_key)
+        elif choice == "5":
+            remove_node_ban(node_secret_id, api_key)
+        elif choice == "6":
+            return
+            
+    except requests.RequestException as e:
+        console.print(Align.center(f"[dim]error: {e}[/dim]"))
+        input("press enter to continue...")
+
+def show_active_bans(node_id: str, api_key: str):
+    """show active bans for this node"""
+    clear_screen()
+    show_header()
+    
+    console.print(Align.center("[bold]active bans[/bold]"))
+    console.print()
+    
+    try:
+        headers = {"x-api-key": api_key}
+        response = requests.post(
+            f"{MAIN_SERVER_URL}/admin/nodes/{node_id}/bans/list",
+            json={"active_only": True},
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            bans = response.json().get("bans", [])
+            
+            if not bans:
+                console.print(Align.center("[dim]no active bans[/dim]"))
+            else:
+                table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+                table.add_column("target", style="dim")
+                table.add_column("type")
+                table.add_column("reason")
+                table.add_column("expires", style="dim")
+                
+                for ban in bans:
+                    target = ban.get("target_username") or ban.get("target_ip", "unknown")
+                    ban_type = ban.get("ban_type", "unknown")
+                    reason = ban.get("reason", "")[:30] + "..." if len(ban.get("reason", "")) > 30 else ban.get("reason", "")
+                    expires = ban.get("expires_at", "never")[:10] if ban.get("expires_at") else "never"
+                    
+                    table.add_row(target, ban_type, reason, expires)
+                
+                console.print(Align.center(table))
+        else:
+            console.print(Align.center(f"[dim]error: {response.text}[/dim]"))
+            
+    except requests.RequestException as e:
+        console.print(Align.center(f"[dim]error: {e}[/dim]"))
+    
+    console.print()
+    input("press enter to continue...")
+
+def create_node_ban(node_id: str, api_key: str, ban_type: str):
+    """create a ban for this node"""
+    clear_screen()
+    show_header()
+    
+    console.print(Align.center(f"[bold]{ban_type} user[/bold]"))
+    console.print()
+    
+    # get target info
+    target_type = Prompt.ask("  ban by", choices=["ip", "username", "both"], default="username")
+    
+    target_ip = None
+    target_username = None
+    
+    if target_type in ["ip", "both"]:
+        target_ip = Prompt.ask("  ip address")
+    
+    if target_type in ["username", "both"]:
+        target_username = Prompt.ask("  username")
+    
+    reason = Prompt.ask("  reason", default="violating node rules")
+    
+    duration_minutes = None
+    if ban_type == "tempban":
+        duration_hours = int(Prompt.ask("  duration (hours)", default="24"))
+        duration_minutes = duration_hours * 60
+    
+    console.print()
+    
+    try:
+        headers = {"x-api-key": api_key}
+        payload = {
+            "ban_type": ban_type,
+            "ban_target": target_type,
+            "reason": reason,
+            "target_ip": target_ip,
+            "target_username": target_username,
+            "duration_minutes": duration_minutes
+        }
+        
+        response = requests.post(
+            f"{MAIN_SERVER_URL}/admin/nodes/{node_id}/bans/create",
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            console.print(Align.center("✓ ban created successfully"))
+            node_state["ban_stats"]["active_bans"] += 1
+            add_activity_log("info", f"{ban_type} created", f"target: {target_username or target_ip}")
+        else:
+            console.print(Align.center(f"✗ error: {response.text}"))
+            
+    except requests.RequestException as e:
+        console.print(Align.center(f"✗ error: {e}"))
+    
+    console.print()
+    input("press enter to continue...")
+
+def kick_user_from_node(node_id: str, api_key: str):
+    """kick a user from this node"""
+    clear_screen()
+    show_header()
+    
+    console.print(Align.center("[bold]kick user[/bold]"))
+    console.print()
+    
+    # get target info
+    target_type = Prompt.ask("  kick by", choices=["ip", "username"], default="username")
+    
+    target_ip = None
+    target_username = None
+    
+    if target_type == "ip":
+        target_ip = Prompt.ask("  ip address")
+    else:
+        target_username = Prompt.ask("  username")
+    
+    reason = Prompt.ask("  reason", default="disruptive behavior")
+    
+    console.print()
+    
+    try:
+        headers = {"x-api-key": api_key}
+        payload = {
+            "ip_address": target_ip,
+            "username": target_username,
+            "reason": reason
+        }
+        
+        response = requests.post(
+            f"{MAIN_SERVER_URL}/admin/nodes/{node_id}/bans/kick",
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            console.print(Align.center("✓ user kicked successfully"))
+            node_state["ban_stats"]["recent_kicks"] += 1
+            add_activity_log("info", "user kicked", f"target: {target_username or target_ip}")
+        else:
+            console.print(Align.center(f"✗ error: {response.text}"))
+            
+    except requests.RequestException as e:
+        console.print(Align.center(f"✗ error: {e}"))
+    
+    console.print()
+    input("press enter to continue...")
+
+def remove_node_ban(node_id: str, api_key: str):
+    """remove a ban from this node"""
+    clear_screen()
+    show_header()
+    
+    console.print(Align.center("[bold]remove ban[/bold]"))
+    console.print()
+    
+    # first show current bans
+    try:
+        headers = {"x-api-key": api_key}
+        response = requests.post(
+            f"{MAIN_SERVER_URL}/admin/nodes/{node_id}/bans/list",
+            json={"active_only": True},
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            bans = response.json().get("bans", [])
+            
+            if not bans:
+                console.print(Align.center("[dim]no active bans to remove[/dim]"))
+                input("press enter to continue...")
+                return
+            
+            # show numbered list
+            for i, ban in enumerate(bans, 1):
+                target = ban.get("target_username") or ban.get("target_ip", "unknown")
+                reason = ban.get("reason", "")[:30]
+                console.print(Align.center(f"[dim]{i}. {target} - {reason}[/dim]"))
+            
+            console.print()
+            choice = int(Prompt.ask("  select ban to remove", choices=[str(i) for i in range(1, len(bans) + 1)]))
+            selected_ban = bans[choice - 1]
+            
+            # remove the ban
+            remove_response = requests.delete(
+                f"{MAIN_SERVER_URL}/admin/nodes/{node_id}/bans/{selected_ban['id']}",
+                headers=headers,
+                timeout=10
+            )
+            
+            if remove_response.status_code == 200:
+                console.print(Align.center("✓ ban removed successfully"))
+                node_state["ban_stats"]["active_bans"] -= 1
+                add_activity_log("info", "ban removed", f"target: {selected_ban.get('target_username') or selected_ban.get('target_ip')}")
+            else:
+                console.print(Align.center(f"✗ error: {remove_response.text}"))
+        else:
+            console.print(Align.center(f"[dim]error: {response.text}[/dim]"))
+            
+    except (requests.RequestException, ValueError) as e:
+        console.print(Align.center(f"[dim]error: {e}[/dim]"))
+    
+    console.print()
+    input("press enter to continue...")
 
 def login_user():
     """interactive user login"""
@@ -338,31 +679,94 @@ def register_user():
     input("press enter to continue...")
 
 async def register_node():
-    """interactive node registration with beautiful ui"""
+    """register this server as a tunnelite node"""
     clear_screen()
     show_header()
     
-    user_api_key = get_user_api_key()
-    if not user_api_key:
+    console.print(Align.center("[bold]register node[/bold]"))
+    console.print()
+    
+    api_key = get_user_api_key()
+    if not api_key:
         console.print(Align.center("[dim]please login first[/dim]"))
         input("press enter to continue...")
         return
     
-    console.print(Align.center("[bold]register this server as a node[/bold]"))
-    console.print()
-    
-    # get node configuration
-    console.print(Align.center("[dim]node configuration[/dim]"))
-    console.print()
-    
-    max_clients = Prompt.ask("  maximum concurrent clients", default="10", console=console)
-    port_range = Prompt.ask("  port range for tunnels (e.g., 8000-8100)", default="8000-8100", console=console)
+    # get registration details
+    hostname = Prompt.ask("  hostname", default="auto-detect")
+    port_range = Prompt.ask("  port range", default="8201-8300")
+    max_clients = int(Prompt.ask("  max clients", default="100"))
     
     console.print()
     
-    def make_layout(status: str, message: str = ""):
-        """create registration progress layout"""
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+        console=console
+    ) as progress:
+        task = progress.add_task("  registering node...", total=None)
+        
+        try:
+            node_secret_id = get_node_secret_id()
+            
+            # get public ip if hostname is auto-detect
+            if hostname == "auto-detect":
+                progress.update(task, description="  detecting public ip...")
+                public_ip = await get_public_ip()
+                if not public_ip:
+                    progress.stop_task(task)
+                    console.print(Align.center("✗ could not detect public ip"))
+                    input("press enter to continue...")
+                    return
+                hostname = f"{public_ip}.nip.io"
+            
+            progress.update(task, description="  registering with server...")
+            
+            payload = {
+                "node_secret_id": node_secret_id,
+                "public_hostname": hostname,
+                "port_range": port_range,
+                "max_clients": max_clients,
+                "user_api_key": api_key
+            }
+            
+            response = requests.post(
+                f"{MAIN_SERVER_URL}/nodes/register",
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            progress.stop_task(task)
+            console.print(Align.center("✓ node registered successfully"))
+            console.print(Align.center(f"[dim]hostname: {hostname}[/dim]"))
+            add_activity_log("success", "node registered", f"hostname: {hostname}")
+            
+        except requests.RequestException as e:
+            progress.stop_task(task)
+            error_msg = e.response.text if e.response and hasattr(e, 'response') else str(e)
+            console.print(Align.center(f"✗ registration failed: {error_msg}"))
+    
+    console.print()
+    input("press enter to continue...")
+
+async def get_public_ip():
+    """get public ip address"""
+    try:
+        response = requests.get("https://api.ipify.org", timeout=10)
+        response.raise_for_status()
+        return response.text.strip()
+    except:
+        return None
+
+async def start_node_production():
+    """start node in production mode with comprehensive monitoring"""
+    
+    def make_layout(status: str, details: str = "", error: str = ""):
+        """create beautiful centered layout for production server"""
         layout = Layout()
+        
         layout.split_column(
             Layout(name="header", size=5),
             Layout(name="main", ratio=1),
@@ -370,230 +774,25 @@ async def register_node():
         )
         
         # header
-        header_content = Panel(
-            Align.center(f"[bold]● {status}[/bold]"),
-            box=box.SIMPLE,
-            style="dim"
-        )
-        layout["header"].update(header_content)
-        
-        # main content
-        if message:
-            main_content = Panel(
-                Align.center(f"[dim]{message}[/dim]"),
-                title="registration",
-                box=box.SIMPLE
-            )
-        else:
-            main_content = Panel(
-                Align.center(f"[dim]{status}...[/dim]"),
-                title="registration",
-                box=box.SIMPLE
-            )
-        layout["main"].update(main_content)
-        
-        # footer
-        footer_content = Panel(
-            Align.center("[dim]please wait...[/dim]"),
-            box=box.SIMPLE,
-            style="dim"
-        )
-        layout["footer"].update(footer_content)
-        
-        return layout
-
-    with Live(make_layout("starting registration"), refresh_per_second=4) as live:
-        try:
-            node_secret_id = get_node_secret_id()
-            
-            # 1. initial heartbeat
-            live.update(make_layout("sending initial heartbeat"))
-            public_ip = await get_public_ip()
-            if not public_ip:
-                live.update(make_layout("error", "could not determine public ip"))
-                await asyncio.sleep(3)
-                return
-            
-            temp_address = f"http://{public_ip}:8201"
-            heartbeat_response = requests.post(
-                f"{MAIN_SERVER_URL}/nodes/register",
-                json={"node_secret_id": node_secret_id, "public_address": temp_address},
-                timeout=10
-            )
-            heartbeat_response.raise_for_status()
-            
-            # 2. start temporary server for challenges
-            live.update(make_layout("starting temporary server"))
-            temp_server_process = Process(target=run_temp_server, daemon=True)
-            temp_server_process.start()
-            await asyncio.sleep(2)
-            
-            # 3. websocket registration
-            live.update(make_layout("connecting to registration service"))
-            ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/registration/ws/register-node"
-            
-            async with websockets.connect(ws_uri, ssl=True) as websocket:
-                # send auth data
-                await websocket.send(json.dumps({
-                    "node_secret_id": node_secret_id,
-                    "user_api_key": user_api_key,
-                }))
-                
-                while True:
-                    message_str = await websocket.recv()
-                    message = json.loads(message_str)
-                    msg_type = message.get("type")
-                    
-                    if msg_type == "reverse_benchmark":
-                        live.update(make_layout("running bandwidth benchmark"))
-                        benchmark_results = run_reverse_benchmark()
-                        if not benchmark_results:
-                            live.update(make_layout("error", "benchmark failed"))
-                            await asyncio.sleep(3)
-                            return
-                        await websocket.send(json.dumps(benchmark_results))
-                        
-                    elif msg_type == "prompt":
-                        prompt_msg = message.get("message", "")
-                        if "max concurrent clients" in prompt_msg:
-                            await websocket.send(json.dumps({"response": max_clients}))
-                        elif "port range" in prompt_msg:
-                            await websocket.send(json.dumps({"response": port_range}))
-                        else:
-                            # fallback for any other prompts
-                            await websocket.send(json.dumps({"response": "default"}))
-                            
-                    elif msg_type == "challenge":
-                        live.update(make_layout("verifying port accessibility"))
-                        port = message.get('port')
-                        key = message.get('key')
-                        
-                        # simple verification - just confirm ready
-                        await websocket.send(json.dumps({"status": "ready"}))
-                        
-                    elif msg_type == "info":
-                        info_msg = message.get('message', '')
-                        live.update(make_layout("processing", info_msg))
-                        
-                    elif msg_type == "success":
-                        success_msg = message.get('message', 'registration complete!')
-                        live.update(make_layout("registration successful", success_msg))
-                        await asyncio.sleep(2)
-                        
-                        # stop temp server
-                        temp_server_process.terminate()
-                        temp_server_process.join(timeout=5)
-                        return
-                        
-                    elif msg_type == "failure":
-                        error_msg = message.get('message', 'registration failed')
-                        live.update(make_layout("registration failed", error_msg))
-                        await asyncio.sleep(3)
-                        
-                        # stop temp server
-                        temp_server_process.terminate()
-                        temp_server_process.join(timeout=5)
-                        return
-                        
-        except Exception as e:
-            live.update(make_layout("error", str(e)))
-            await asyncio.sleep(3)
-            
-            # cleanup temp server
-            try:
-                temp_server_process.terminate()
-                temp_server_process.join(timeout=5)
-            except:
-                pass
-
-async def get_public_ip():
-    """get public ip address"""
-    try:
-        response = requests.get("https://api.ipify.org?format=json", timeout=10)
-        response.raise_for_status()
-        return response.json()["ip"]
-    except:
-        return None
-
-def run_reverse_benchmark():
-    """run bandwidth benchmark"""
-    try:
-        # download test
-        down_url = f"{MAIN_SERVER_URL}/registration/benchmark/download"
-        start_time = time.monotonic()
-        with requests.get(down_url, stream=True, timeout=20) as r:
-            r.raise_for_status()
-            for _ in r.iter_content(chunk_size=8192): 
-                pass
-        down_duration = time.monotonic() - start_time
-        down_mbps = (10 * 1024 * 1024 / down_duration) * 8 / (1024*1024)
-
-        # upload test
-        up_url = f"{MAIN_SERVER_URL}/registration/benchmark/upload"
-        dummy_payload = b'\0' * (10 * 1024 * 1024)
-        start_time = time.monotonic()
-        r = requests.post(up_url, data=dummy_payload, timeout=20)
-        r.raise_for_status()
-        up_duration = time.monotonic() - start_time
-        up_mbps = (10 * 1024 * 1024 / up_duration) * 8 / (1024*1024)
-
-        return {"down_mbps": down_mbps, "up_mbps": up_mbps}
-    except:
-        return None
-
-def run_temp_server():
-    """run temporary server for registration challenges"""
-    try:
-        uvicorn.run(
-            "tunnel_node.main:app",
-            host="0.0.0.0",
-            port=8201,
-            log_level="warning",
-            access_log=False
-        )
-    except:
-        pass
-
-async def start_node_production():
-    """start node in production mode with ssl"""
-    clear_screen()
-    show_header()
-    
-    user_api_key = get_user_api_key()
-    node_secret_id = get_node_secret_id()
-    
-    if not user_api_key or not node_secret_id:
-        console.print(Align.center("[dim]node not configured - please register first[/dim]"))
-        input("press enter to continue...")
-        return
-    
-    def make_layout(status: str, details: str = "", error: str = ""):
-        """create production server layout"""
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header", size=7),
-            Layout(name="main", ratio=1),
-            Layout(name="footer", size=3)
-        )
-        
         if error:
             header_content = Panel(
-                Align.center(f"[bold]● error[/bold]\n[dim]{error}[/dim]"),
+                Align.center(f"[bold]✗ {error}[/bold]"),
                 box=box.SIMPLE,
-                style="dim"
+                style="red"
             )
         elif status == "running":
-            # show live metrics
-            sys_metrics = collect_system_metrics()
-            stats_text = f"[bold]tunnelite node[/bold] [dim]│[/dim] "
-            stats_text += f"cpu: {sys_metrics.get('cpu_usage_percent', 0):.1f}% [dim]│[/dim] "
-            stats_text += f"mem: {sys_metrics.get('memory_usage_percent', 0):.1f}% [dim]│[/dim] "
-            stats_text += f"tunnels: {telemetry_data['tunnels']['active_tunnels']}"
+            uptime = time.time() - node_state["start_time"] if node_state["start_time"] else 0
+            uptime_str = format_uptime(uptime)
+            
+            header_items = [
+                "[bold]tunnelite node[/bold]",
+                f"[dim]{details}[/dim]",
+                f"uptime: {uptime_str}"
+            ]
             
             header_content = Panel(
-                Align.center(stats_text),
-                box=box.SIMPLE,
-                style="bold"
+                Align.center(" • ".join(header_items)),
+                box=box.SIMPLE
             )
         else:
             header_content = Panel(
@@ -604,33 +803,104 @@ async def start_node_production():
         
         layout["header"].update(header_content)
         
-        # main content
-        if error:
-            main_content = Panel(
-                Align.center(f"[dim]{error}[/dim]"),
-                title="error",
+        # main area - split into metrics and activity
+        if status == "running":
+            layout["main"].split_row(
+                Layout(name="metrics", ratio=2),
+                Layout(name="activity", ratio=1)
+            )
+            
+            # metrics table
+            metrics = collect_system_metrics()
+            metrics_table = Table(box=box.SIMPLE, show_header=False)
+            metrics_table.add_column("metric", style="dim", width=12)
+            metrics_table.add_column("value", width=15)
+            
+            if metrics:
+                cpu_usage = metrics.get("cpu_usage_percent", 0)
+                cpu_color = "red" if cpu_usage > 80 else "yellow" if cpu_usage > 60 else "green"
+                metrics_table.add_row("cpu", f"[{cpu_color}]{cpu_usage:.1f}%[/{cpu_color}]")
+                
+                memory_usage = metrics.get("memory_usage_percent", 0)
+                memory_color = "red" if memory_usage > 80 else "yellow" if memory_usage > 60 else "green"
+                memory_used = format_bytes(metrics.get("memory_used_mb", 0) * 1024 * 1024)
+                memory_total = format_bytes(metrics.get("memory_total_mb", 0) * 1024 * 1024)
+                metrics_table.add_row("memory", f"[{memory_color}]{memory_usage:.1f}%[/{memory_color}]")
+                metrics_table.add_row("", f"[dim]{memory_used}/{memory_total}[/dim]")
+                
+                bandwidth = metrics.get("bandwidth_mbps", 0)
+                bandwidth_color = "green" if bandwidth > 0 else "dim"
+                metrics_table.add_row("bandwidth", f"[{bandwidth_color}]{bandwidth:.2f} mbps[/{bandwidth_color}]")
+                
+                connections = metrics.get("connections_count", 0)
+                metrics_table.add_row("connections", str(connections))
+                
+                # tunnel stats
+                tunnel_stats = node_state["tunnel_stats"]
+                metrics_table.add_row("tunnels", f"{tunnel_stats['active_tunnels']} active")
+                metrics_table.add_row("requests", str(tunnel_stats["total_requests"]))
+                metrics_table.add_row("data", format_bytes(tunnel_stats["data_transferred_mb"] * 1024 * 1024))
+                
+                # ban stats
+                ban_stats = node_state["ban_stats"]
+                metrics_table.add_row("bans", f"{ban_stats['active_bans']} active")
+            
+            metrics_panel = Panel(
+                metrics_table,
+                title="metrics",
                 box=box.SIMPLE
             )
-        elif status == "running":
-            main_content = Panel(
-                Align.center(
-                    f"[bold]node is running[/bold]\n\n"
-                    f"[dim]hostname:[/dim] {details}\n"
-                    f"[dim]status:[/dim] serving tunnels\n"
-                    f"[dim]uptime:[/dim] {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))}\n\n"
-                    f"[dim]telemetry is being collected and sent to server[/dim]"
-                ),
-                title="production mode",
-                box=box.SIMPLE
+            layout["metrics"].update(metrics_panel)
+            
+            # activity log
+            activity_lines = []
+            for entry in node_state["activity_log"][-10:]:  # last 10 entries
+                timestamp = entry["timestamp"]
+                level = entry["level"]
+                action = entry["action"]
+                details = entry["details"]
+                
+                # format with simple icons
+                if level == "success":
+                    icon = "✓"
+                elif level == "error":
+                    icon = "✗"
+                elif level == "warning":
+                    icon = "!"
+                else:
+                    icon = "•"
+                
+                if details:
+                    line = f"[dim]{timestamp}[/dim] {icon} {action} [dim]({details})[/dim]"
+                else:
+                    line = f"[dim]{timestamp}[/dim] {icon} {action}"
+                
+                activity_lines.append(line)
+            
+            if not activity_lines:
+                activity_content = "[dim]waiting for activity...[/dim]"
+            else:
+                activity_content = "\n".join(activity_lines)
+            
+            activity_panel = Panel(
+                activity_content,
+                title="activity",
+                box=box.SIMPLE,
+                style="dim"
             )
+            layout["activity"].update(activity_panel)
         else:
-            main_content = Panel(
-                Align.center(f"[dim]{details or status}...[/dim]"),
-                title="starting",
+            # simple status display
+            if details:
+                content = f"[dim]{details}[/dim]"
+            else:
+                content = f"[dim]{status}...[/dim]"
+            
+            status_panel = Panel(
+                Align.center(content),
                 box=box.SIMPLE
             )
-        
-        layout["main"].update(main_content)
+            layout["main"].update(status_panel)
         
         # footer
         footer_content = Panel(
@@ -642,10 +912,13 @@ async def start_node_production():
         
         return layout
 
-    with Live(make_layout("checking node status"), refresh_per_second=2) as live:
+    with Live(make_layout("starting"), refresh_per_second=2) as live:
         try:
             # 1. verify node registration
-            live.update(make_layout("verifying registration"))
+            live.update(make_layout("verifying node"))
+            add_activity_log("info", "verifying node registration")
+            
+            node_secret_id = get_node_secret_id()
             headers = {"x-node-secret-id": node_secret_id}
             response = requests.get(f"{MAIN_SERVER_URL}/nodes/me", headers=headers, timeout=10)
             
@@ -655,23 +928,24 @@ async def start_node_production():
                 return
             
             node_data = response.json()
-            hostname = node_data.get("public_hostname")
-            
-            if not hostname:
-                live.update(make_layout("", "", "node registration incomplete"))
-                await asyncio.sleep(3)
-                return
+            hostname = node_data.get("public_hostname", "unknown")
+            add_activity_log("success", "node verified", f"hostname: {hostname}")
             
             # 2. get public ip
             live.update(make_layout("getting public ip"))
+            add_activity_log("info", "getting public ip")
             public_ip = await get_public_ip()
             if not public_ip:
+                add_activity_log("error", "ip detection failed")
                 live.update(make_layout("", "", "could not determine public ip"))
                 await asyncio.sleep(3)
                 return
             
+            add_activity_log("success", "public ip detected", f"ip: {public_ip}")
+            
             # 3. request ssl certificate from server
-            live.update(make_layout("requesting ssl certificate from server"))
+            live.update(make_layout("requesting ssl certificate"))
+            add_activity_log("info", "requesting ssl certificate")
             cert_response = requests.post(
                 f"{MAIN_SERVER_URL}/internal/control/generate-ssl-certificate",
                 json={"public_ip": public_ip},
@@ -682,12 +956,16 @@ async def start_node_production():
             
             cert_data = cert_response.json()
             if cert_data.get("status") != "success":
+                add_activity_log("error", "ssl certificate failed", str(cert_data))
                 live.update(make_layout("", "", f"ssl certificate failed: {cert_data}"))
                 await asyncio.sleep(3)
                 return
             
+            add_activity_log("success", "ssl certificate received")
+            
             # 4. save ssl certificates
             live.update(make_layout("saving ssl certificates"))
+            add_activity_log("info", "saving ssl certificates")
             ssl_cert = cert_data.get("ssl_certificate")
             ssl_key = cert_data.get("ssl_private_key")
             
@@ -706,15 +984,17 @@ async def start_node_production():
             os.chmod(key_path, 0o600)
             
             # 5. start production server
-            live.update(make_layout("starting production server", hostname))
+            live.update(make_layout("starting production server"))
+            add_activity_log("info", "ssl certificates configured")
             
             # parse port range
             port_range_str = node_data.get("port_range", "8201")
             port_list = parse_port_range(port_range_str)
             main_port = port_list[0] if port_list else 8201
             
-            # start telemetry collection
-            start_time = time.time()
+            # initialize node state
+            node_state["start_time"] = time.time()
+            add_activity_log("success", "node starting up", f"port: {main_port}")
             
             # create uvicorn config
             config = uvicorn.Config(
@@ -734,7 +1014,15 @@ async def start_node_production():
                     await asyncio.sleep(60)  # send telemetry every minute
                     await send_telemetry()
             
+            async def metrics_task():
+                while True:
+                    await asyncio.sleep(5)  # update metrics every 5 seconds
+                    collect_system_metrics()
+            
             telemetry_task_handle = asyncio.create_task(telemetry_task())
+            metrics_task_handle = asyncio.create_task(metrics_task())
+            
+            add_activity_log("success", "production server started", f"https://{hostname}:{main_port}")
             
             # update ui to running state
             live.update(make_layout("running", hostname))
@@ -743,7 +1031,9 @@ async def start_node_production():
             try:
                 await server.serve()
             except KeyboardInterrupt:
+                add_activity_log("info", "shutdown requested")
                 telemetry_task_handle.cancel()
+                metrics_task_handle.cancel()
                 live.update(make_layout("shutting down"))
                 await asyncio.sleep(1)
                 
@@ -768,39 +1058,40 @@ def parse_port_range(range_str: str) -> List[int]:
     return ports
 
 def show_main_menu():
-    """show main menu"""
+    """show minimalistic main menu"""
     clear_screen()
     show_header()
     show_auth_status()
     show_node_status()
     
+    # simple menu
     menu_items = [
         "1. start node",
-        "2. register node", 
-        "3. login",
-        "4. register account",
-        "5. exit"
+        "2. register node",
+        "3. ban management",
+        "4. login",
+        "5. register account",
+        "6. exit"
     ]
-    
-    console.print(Align.center("[bold]node manager[/bold]"))
-    console.print()
     
     for item in menu_items:
         console.print(Align.center(f"[dim]{item}[/dim]"))
     
     console.print()
     
-    choice = Prompt.ask("  choose option", choices=["1", "2", "3", "4", "5"], console=console)
+    choice = Prompt.ask("  choose option", choices=["1", "2", "3", "4", "5", "6"], console=console)
     
     if choice == "1":
         asyncio.run(start_node_production())
     elif choice == "2":
         asyncio.run(register_node())
     elif choice == "3":
-        login_user()
+        show_ban_management()
     elif choice == "4":
-        register_user()
+        login_user()
     elif choice == "5":
+        register_user()
+    elif choice == "6":
         console.print()
         console.print(Align.center("[dim]goodbye[/dim]"))
         sys.exit(0)
@@ -823,6 +1114,11 @@ def start():
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
     """tunnelite node manager"""
+    # check for admin privileges on systems that support it
+    if hasattr(os, 'geteuid') and os.geteuid() != 0:
+        console.print(Align.center("[red]error: this script must be run as root[/red]"))
+        sys.exit(1)
+    
     if ctx.invoked_subcommand is None:
         tui()
 

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from server.components import database
 from server.components.models import *
+from server.components.bans import check_ban, get_client_ip
 
 from server.config import get as get_config
 
@@ -35,8 +36,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
-# api key dependency
-async def get_current_user(api_key: str = Depends(api_key_header)) -> Dict:
+# api key dependency with ban checking
+async def get_current_user(request: Request = None, api_key: str = Depends(api_key_header)) -> Dict:
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -52,7 +53,27 @@ async def get_current_user(api_key: str = Depends(api_key_header)) -> Dict:
             headers={"www-authenticate": "bearer"},
         )
 
+    # check for bans if request context is available
+    if request:
+        client_ip = get_client_ip(request)
+        ban_check = check_ban(
+            ip_address=client_ip,
+            username=user["username"],
+            user_id=user.get("user_id")
+        )
+        
+        if ban_check.is_banned and ban_check.ban_scope.value == "service":
+            raise HTTPException(
+                status_code=403,
+                detail=f"account banned - {ban_check.ban_type.value}: {ban_check.reason}"
+            )
+
     return user
+
+# helper function for getting user from api key with ban checking
+async def get_user_from_api_key(request: Request, api_key: str = Depends(api_key_header)) -> Dict:
+    """get user from api key with comprehensive ban checking"""
+    return await get_current_user(request, api_key)
 
 # node api key dependency
 async def get_node_from_api_key(request: Request) -> Dict:

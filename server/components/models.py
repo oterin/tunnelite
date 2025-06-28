@@ -1,8 +1,9 @@
 from os import sep
 import time
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Enum
 from requests.models import stream_decode_response_unicode
+from datetime import datetime
 
 class UserCreate(BaseModel):
     username: str
@@ -66,3 +67,56 @@ class ActivationRequest(BaseModel):
 
 class DeactivationRequest(BaseModel):
     node_secret_id: str
+
+class BanType(str, Enum):
+    KICK = "kick"           # immediate disconnect, no persistence
+    TEMPBAN = "tempban"     # temporary ban with expiration
+    PERMBAN = "permban"     # permanent ban
+
+class BanScope(str, Enum):
+    TUNNEL = "tunnel"       # ban from specific tunnel
+    NODE = "node"          # ban from specific node
+    SERVICE = "service"    # ban from entire service
+
+class BanTarget(str, Enum):
+    IP = "ip"              # ban by ip address
+    ACCOUNT = "account"    # ban by user account
+    BOTH = "both"          # ban both ip and account
+
+class Ban(BaseModel):
+    id: str
+    ban_type: BanType
+    ban_scope: BanScope
+    ban_target: BanTarget
+    
+    # target identifiers
+    target_ip: Optional[str] = None
+    target_username: Optional[str] = None
+    target_user_id: Optional[str] = None
+    
+    # scope identifiers
+    tunnel_id: Optional[str] = None
+    node_id: Optional[str] = None
+    
+    # ban details
+    reason: str
+    banned_by: str          # admin username who issued the ban
+    banned_at: datetime
+    expires_at: Optional[datetime] = None  # none for permanent bans
+    
+    # additional info
+    is_active: bool = True
+    notes: Optional[str] = None
+    
+    # tracking
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class BanCheck(BaseModel):
+    """result of ban check"""
+    is_banned: bool
+    ban_type: Optional[BanType] = None
+    ban_scope: Optional[BanScope] = None
+    reason: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    banned_by: Optional[str] = None
