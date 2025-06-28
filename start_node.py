@@ -595,6 +595,7 @@ async def main():
         print("info:     node certificate found, verifying with server...")
         # verify the node still exists on the server
         node_record = await get_self_node_record()
+        print(f"debug:    node_record result: {node_record}")
         if node_record:
             print("info:     node verified on server, running full production startup with DNS and SSL...")
             await main_startup_flow()
