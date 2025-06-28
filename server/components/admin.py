@@ -48,21 +48,35 @@ router = APIRouter(
 async def list_all_nodes():
     return database.get_all_nodes()
 
+@router.get("/nodes/pending", response_model=List[Node])
+async def list_pending_nodes():
+    """returns a list of all nodes with 'pending' status."""
+    all_nodes = database.get_all_nodes()
+    return [node for node in all_nodes if node.get("status") == "pending"]
+
 @router.post(
-    "/nodes/{public_hostname}/approve",
-    status_code=status.HTTP_200_OK
+    "/nodes/{node_secret_id}/approve",
+    status_code=status.HTTP_200_OK,
+    summary="Approve a pending node"
 )
-async def approve_node(public_hostname: str) -> dict:
-    node = database.get_node_by_hostname(public_hostname)
+async def approve_node(node_secret_id: str) -> dict:
+    """approves a node, changing its status from 'pending' to 'active'."""
+    node = database.get_node_by_secret_id(node_secret_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="node not found"
         )
+    
+    if node.get("status") != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"node is not in 'pending' state (current state: {node.get('status')})"
+        )
 
-    if database.update_node_status(node["node_secret_id"], "approved"):
+    if database.update_node_status(node["node_secret_id"], "active"):
         return {
-            "message": f"node '{public_hostname}' approved"
+            "message": f"node with secret id '{node_secret_id[:8]}...' has been approved and is now active."
         }
 
     raise HTTPException(
@@ -71,11 +85,13 @@ async def approve_node(public_hostname: str) -> dict:
     )
 
 @router.post(
-    "/nodes/{public_hostname}/disable",
-    status_code=status.HTTP_200_OK
+    "/nodes/{node_secret_id}/disable",
+    status_code=status.HTTP_200_OK,
+    summary="Disable an active node"
 )
-async def disable_node(public_hostname: str) -> dict:
-    node = database.get_node_by_hostname(public_hostname)
+async def disable_node(node_secret_id: str) -> dict:
+    """disables a node, changing its status to 'disabled'."""
+    node = database.get_node_by_secret_id(node_secret_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -84,7 +100,7 @@ async def disable_node(public_hostname: str) -> dict:
 
     if database.update_node_status(node["node_secret_id"], "disabled"):
         return {
-            "message": f"node '{public_hostname}' disabled"
+            "message": f"node '{node.get('public_hostname', node_secret_id[:8])}' disabled"
         }
 
     raise HTTPException(

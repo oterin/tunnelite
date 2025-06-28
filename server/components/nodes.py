@@ -34,31 +34,43 @@ async def get_node_me(x_node_secret_id: str = Header(...)):
 
 @router.post("/register")
 async def register_node(node_info: NodeInfo, request: Request):
-    node_info_dict = node_info.model_dump()
-    node_secret_id = node_info_dict["node_secret_id"]
+    incoming_data = node_info.model_dump()
+    node_secret_id = incoming_data["node_secret_id"]
 
     # check if this is the very first time we've seen this node
-    existing_node = database.get_node_by_secret_id(node_secret_id)
-    if not existing_node:
-        # if it's new, perform geoip lookup once
+    node_data = database.get_node_by_secret_id(node_secret_id)
+    is_new_node = not node_data
+
+    if is_new_node:
+        # if it's new, create from the full Node model to get defaults
+        node_data = Node(
+            node_secret_id=node_secret_id,
+            public_address=node_info.public_address
+        ).model_dump()
+
+    # update the record with the incoming data
+    node_data.update(incoming_data)
+    
+    if is_new_node:
+        # and perform geoip lookup once for new nodes
         verified_ip = request.client.host
-        node_info_dict["verified_ip_address"] = verified_ip
+        node_data["verified_ip_address"] = verified_ip
         try:
             geo_response = requests.get(f"http://ip-api.com/json/{verified_ip}")
             geo_response.raise_for_status()
-            node_info_dict["verified_geolocation"] = geo_response.json()
+            node_data["verified_geolocation"] = geo_response.json()
         except Exception as e:
-            node_info_dict["verified_geolocation"] = {"error": str(e)}
+            node_data["verified_geolocation"] = {"error": str(e)}
 
     # always update the timestamp for the heartbeat
-    node_info_dict["last_seen_at"] = time.time()
-    database.upsert_node(node_info_dict)
+    node_data["last_seen_at"] = time.time()
+    database.upsert_node(node_data)
 
     # return the current status to the node from the db
     current_node_data = database.get_node_by_secret_id(node_secret_id)
     return {
-        "status": current_node_data.get("status"),
-        "message": f"heartbeat received. current status: {current_node_data.get('status')}"
+        "status": current_node_data.get("status", "pending"),
+        "message": f"heartbeat received. current status: {current_node_data.get('status', 'pending')}"
     }
 
 @router.get("/available", response_model=List[NodeInfoPublic])
@@ -82,20 +94,23 @@ async def node_heartbeat(node_info: NodeInfo, x_node_cert: str = Header(...)):
         claims = security.verify(x_node_cert)
         node_secret_id = claims["sub"]
         
-        # get existing node or create new one
-        node = database.get_node_by_secret_id(node_secret_id)
-        if not node:
-            node = {"node_secret_id": node_secret_id}
+        # get existing node or create new one with defaults
+        node_data = database.get_node_by_secret_id(node_secret_id)
+        if not node_data:
+            node_data = Node(
+                node_secret_id=node_secret_id,
+                public_address=node_info.public_address
+            ).model_dump()
         
         # update with heartbeat data
-        node.update(node_info.model_dump())
-        node["last_seen_at"] = time.time()
+        node_data.update(node_info.model_dump())
+        node_data["last_seen_at"] = time.time()
         
-        database.upsert_node(node)
+        database.upsert_node(node_data)
         
         return {
-            "status": node.get("status", "pending"),
-            "message": f"heartbeat received via jwt. current status: {node.get('status', 'pending')}"
+            "status": node_data.get("status", "pending"),
+            "message": f"heartbeat received via jwt. current status: {node_data.get('status', 'pending')}"
         }
         
     except ValueError as e:
