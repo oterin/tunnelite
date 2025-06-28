@@ -1,5 +1,6 @@
 import anyio
 import time
+import socket
 from fastapi import APIRouter, Request, Response, HTTPException, status
 from .connection_manager import manager
 from .network_logger import network_logger, NetworkEvent, NetworkEventType
@@ -286,7 +287,14 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
 async def start_tcp_listener(tunnel_id: str, port: int):
     """starts a dedicated tcp listener for a single tunnel on a specific port."""
     try:
-        listener = await anyio.create_tcp_listener(local_port=port)
+        # create socket with SO_REUSEADDR to allow immediate port reuse
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', port))
+        sock.listen()
+        
+        # create anyio listener from the configured socket
+        listener = anyio.create_tcp_listener(sock=sock)
         print(f"info:     tcp listener started for tunnel {tunnel_id} on port {port}")
         handler = lambda client: tcp_proxy_handler(client, tunnel_id)
         await listener.serve(handler)

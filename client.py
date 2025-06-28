@@ -540,17 +540,23 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                                     # update stats
                                     bytes_in += len(data)
                                     live.update(make_layout("active", public_url))
-                        except websockets.exceptions.ConnectionClosed:
-                            print("debug:    websocket connection closed in forward_to_local")
+                                else:
+                                    print(f"debug:    received non-bytes data from websocket: {type(data)}")
+                        except websockets.exceptions.ConnectionClosed as e:
+                            print(f"debug:    websocket connection closed in forward_to_local: {e}")
+                            add_network_event("connection", "websocket closed (client side)")
                         except Exception as e:
-                            print(f"debug:    error in forward_to_local: {e}")
+                            print(f"error:    unexpected error in forward_to_local: {e}")
+                            add_network_event("error", f"forward_to_local error: {e}")
                         finally:
+                            print("debug:    cleaning up local writer connection")
                             if not local_writer.is_closing():
                                 local_writer.close()
                                 try:
                                     await local_writer.wait_closed()
-                                except:
-                                    pass
+                                    print("debug:    local writer closed successfully")
+                                except Exception as e:
+                                    print(f"debug:    error closing local writer: {e}")
 
                     async def forward_to_websocket():
                         """forward data from local tcp service to websocket"""
@@ -558,7 +564,8 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                             while True:
                                 data = await local_reader.read(4096)
                                 if not data:
-                                    print("debug:    local tcp connection closed")
+                                    print("debug:    local tcp connection closed (no more data)")
+                                    add_network_event("connection", "local service closed connection")
                                     break
                                 print(f"debug:    forwarding {len(data)} bytes from local service to websocket")
                                 add_network_event("response", f"TCP response ({len(data)}b)")
@@ -567,17 +574,33 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                                 # update stats
                                 bytes_out += len(data)
                                 live.update(make_layout("active", public_url))
-                        except websockets.exceptions.ConnectionClosed:
-                            print("debug:    websocket connection closed in forward_to_websocket")
+                        except websockets.exceptions.ConnectionClosed as e:
+                            print(f"debug:    websocket connection closed in forward_to_websocket: {e}")
+                            add_network_event("connection", "websocket closed (server side)")
                         except Exception as e:
-                            print(f"debug:    error in forward_to_websocket: {e}")
+                            print(f"error:    unexpected error in forward_to_websocket: {e}")
+                            add_network_event("error", f"forward_to_websocket error: {e}")
 
-                    # run both forwarding tasks concurrently
-                    await asyncio.gather(
-                        forward_to_local(),
-                        forward_to_websocket(),
-                        return_exceptions=True
-                    )
+                    # run both forwarding tasks concurrently with better error handling
+                    try:
+                        print("debug:    starting bidirectional tcp forwarding tasks")
+                        await asyncio.gather(
+                            forward_to_local(),
+                            forward_to_websocket(),
+                            return_exceptions=True
+                        )
+                    except Exception as e:
+                        print(f"error:    tcp forwarding crashed: {e}")
+                        add_network_event("error", f"tcp forwarding crashed: {e}")
+                    finally:
+                        print("debug:    tcp forwarding tasks completed, cleaning up")
+                        # ensure local connection is closed
+                        if not local_writer.is_closing():
+                            local_writer.close()
+                            try:
+                                await local_writer.wait_closed()
+                            except:
+                                pass
 
         except requests.RequestException as e:
             error_msg = e.response.text if e.response else str(e)
@@ -591,6 +614,12 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
         except websockets.exceptions.ConnectionClosed as e:
             add_network_event("connection", f"connection closed: {e.reason} (code: {e.code})")
             live.update(make_layout("", "", f"connection closed: {e.reason} (code: {e.code})"))
+            await asyncio.sleep(3)
+        except Exception as e:
+            # catch any unexpected crashes
+            print(f"error:    unexpected tunnel crash: {e}")
+            add_network_event("error", f"tunnel crashed: {e}")
+            live.update(make_layout("", "", f"tunnel crashed: {e}"))
             await asyncio.sleep(3)
 
 # --- tui functions ---
