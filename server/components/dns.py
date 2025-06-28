@@ -2,91 +2,98 @@ import os
 import requests
 from typing import List, Dict, Any
 
-# load spaceship api keys and base domain from server/dns_secrets.json
+# load cloudflare api keys and base domain from server/dns_secrets.json
 import json
 
 secrets_path = os.path.join(os.path.dirname(__file__), "..", "dns_secrets.json")
 try:
     with open(secrets_path, "r") as f:
         _dns_secrets = json.load(f)
-        SPACESHIP_API_KEY = _dns_secrets.get("SPACESHIP_API_KEY")
-        SPACESHIP_API_SECRET = _dns_secrets.get("SPACESHIP_API_SECRET")
+        CLOUDFLARE_API_TOKEN = _dns_secrets.get("CLOUDFLARE_API_TOKEN")
+        CLOUDFLARE_ZONE_ID = _dns_secrets.get("CLOUDFLARE_ZONE_ID")
         BASE_DOMAIN = _dns_secrets.get("BASE_DOMAIN", "tunnelite.ws")
 except Exception as e:
     print(f"error:    could not load dns_secrets.json: {e}")
-    SPACESHIP_API_KEY = None
-    SPACESHIP_API_SECRET = None
+    CLOUDFLARE_API_TOKEN = None
+    CLOUDFLARE_ZONE_ID = None
     BASE_DOMAIN = "tunnelite.ws"
 
-API_BASE_URL = "https://spaceship.dev/api/v1"
+API_BASE_URL = "https://api.cloudflare.com/v4"
 
 def update_node_a_record(hostname: str, ip_address: str) -> bool:
     """
-    Updates the A record for a given node hostname using the Spaceship API.
-    This function performs a safe update by fetching existing records,
-    modifying only the target record, and putting the full list back.
-    API Docs: https://docs.spaceship.dev/#tag/DNS-records/operation/saveRecords
+    Updates the A record for a given node hostname using the Cloudflare API.
+    This function finds existing records and updates them, or creates new ones.
+    API Docs: https://developers.cloudflare.com/api/operations/dns-records-for-a-zone-create-dns-record
     """
-    if not all([SPACESHIP_API_KEY, SPACESHIP_API_SECRET, BASE_DOMAIN]):
-        print("error:    Spaceship API credentials or base domain not configured.")
+    if not all([CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, BASE_DOMAIN]):
+        print("error:    Cloudflare API credentials or zone ID not configured.")
         return False
 
-    # The "name" for the API is the subdomain part (e.g., "node-us-1")
+    # the "name" for cloudflare is the full hostname (e.g., "node-us-1.tunnelite.ws")
     if not hostname.endswith(BASE_DOMAIN):
         print(f"error:    Hostname {hostname} does not belong to base domain {BASE_DOMAIN}.")
         return False
     
-    # Use '@' for the apex domain, otherwise just the subdomain part
-    name = hostname.replace(f".{BASE_DOMAIN}", "")
-    if name == BASE_DOMAIN:
-        name = "@"
-    
     headers = {
-        "X-API-Key": SPACESHIP_API_KEY,
-        "X-API-Secret": SPACESHIP_API_SECRET,
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+        "Content-Type": "application/json",
     }
 
     try:
-        # 1. Get all existing records to avoid accidentally deleting them
-        # Note: Spaceship's API is paginated. For simplicity, this assumes 
-        # you have fewer than 500 records. Increase 'take' if needed.
-        get_url = f"{API_BASE_URL}/dns/records/{BASE_DOMAIN}?take=500&skip=0"
-        res = requests.get(get_url, headers=headers, timeout=15)
-        res.raise_for_status()
-        records = res.json().get("items", [])
-
-        # 2. Filter out any old A records for this specific hostname
-        # The API requires a list of dictionaries for the request body
-        updated_records: List[Dict[str, Any]] = [
-            r for r in records
-            if not (r.get("type") == "A" and r.get("name") == name)
-        ]
-
-        # 3. Add the new A record for our node
-        new_record = {
+        # 1. first, check if a record already exists for this hostname
+        list_url = f"{API_BASE_URL}/zones/{CLOUDFLARE_ZONE_ID}/dns_records"
+        params = {
             "type": "A",
-            "name": name,
-            "address": ip_address,
-            "ttl": 300 # A low TTL is good for dynamic IPs
+            "name": hostname
         }
-        updated_records.append(new_record)
         
-        # We need to format the body to match the API specification,
-        # which expects a list of records.
-        request_body = updated_records
-
-        # 4. Put the entire new list of records back
-        put_url = f"{API_BASE_URL}/dns/records/{BASE_DOMAIN}"
-        res = requests.put(put_url, headers=headers, json=request_body, timeout=15)
+        res = requests.get(list_url, headers=headers, params=params, timeout=15)
         res.raise_for_status()
+        existing_records = res.json().get("result", [])
 
-        print(f"info:     Successfully updated A record for {hostname} to {ip_address}")
+        if existing_records:
+            # 2. update the existing record
+            record_id = existing_records[0]["id"]
+            update_url = f"{API_BASE_URL}/zones/{CLOUDFLARE_ZONE_ID}/dns_records/{record_id}"
+            
+            update_data = {
+                "type": "A",
+                "name": hostname,
+                "content": ip_address,
+                "ttl": 300  # low ttl for dynamic ips
+            }
+            
+            res = requests.put(update_url, headers=headers, json=update_data, timeout=15)
+            res.raise_for_status()
+            
+            print(f"info:     Successfully updated existing A record for {hostname} to {ip_address}")
+        else:
+            # 3. create a new record
+            create_url = f"{API_BASE_URL}/zones/{CLOUDFLARE_ZONE_ID}/dns_records"
+            
+            create_data = {
+                "type": "A",
+                "name": hostname,
+                "content": ip_address,
+                "ttl": 300  # low ttl for dynamic ips
+            }
+            
+            res = requests.post(create_url, headers=headers, json=create_data, timeout=15)
+            res.raise_for_status()
+            
+            print(f"info:     Successfully created new A record for {hostname} to {ip_address}")
+
         return True
 
     except requests.RequestException as e:
         print(f"error:    Failed to update DNS record for {hostname}: {e}")
-        if e.response:
-            print(f"error details: {e.response.text}")
+        if hasattr(e, 'response') and e.response:
+            try:
+                error_details = e.response.json()
+                print(f"error details: {error_details}")
+            except:
+                print(f"error details: {e.response.text}")
         return False
     except Exception as e:
         print(f"error:    An unexpected error occurred in DNS update: {e}")
