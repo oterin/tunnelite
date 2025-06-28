@@ -195,3 +195,4 @@ cython_debug/
 silly.py
 silly.txt
 server/dns_secrets.json
+.vscode/settings.json
