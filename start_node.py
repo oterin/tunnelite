@@ -7,7 +7,7 @@ import uuid
 import time
 import socket
 from multiprocessing import Process, cpu_count
-from socket import socket, AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
+from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -467,7 +467,7 @@ def drop_privileges(uid_name: str, gid_name: str):
     os.umask(0o077)
     print(f"info:     (pid: {os.getpid()}) process privileges dropped to {uid_name}:{gid_name}")
 
-def start_worker_process(https_socket: socket):
+def start_worker_process(https_socket: socket.socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
     drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
 
@@ -503,7 +503,6 @@ def run_temp_api_server():
         print(f"info:     temp server will bind to {host}:{port}")
         
         # check if port is available
-        import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind((host, port))
@@ -578,7 +577,6 @@ def parse_port_range(range_str: str):
 
 def find_available_port_in_range(port_list):
     """find the first available port from the list"""
-    import socket
     for port in port_list:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
