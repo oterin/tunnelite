@@ -101,7 +101,7 @@ async def get_node_from_token(
 
         return node
 
-    except jwt.PyJWTError as e:
+    except jwt.InvalidTokenError as e:
         raise WebSocketDisconnect(code=1008, reason=f"invalid token: {e}")
 
 # api endpoints
