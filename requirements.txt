@@ -10,3 +10,5 @@ websockets
 passlib[bcrypt]
 typer[all]
 rich
+certbot
+certbot-dns-cloudflare

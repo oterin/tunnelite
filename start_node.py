@@ -75,58 +75,129 @@ async def wait_for_dns_propagation(hostname: str, expected_ip: str):
     This is crucial before attempting to get an SSL certificate.
     """
     print(f"info:     Waiting for DNS propagation for {hostname} to point to {expected_ip}...")
-    # Wait up to 120 seconds (12 tries * 10s sleep)
-    for i in range(12):
+    # Wait up to 300 seconds (30 tries * 10s sleep) - DNS can take a while
+    for i in range(30):
         try:
             # Note: This checks the DNS resolution from where the node is running.
             # This is a good indicator but not a guarantee of global propagation.
             resolved_ip = socket.gethostbyname(hostname)
             if resolved_ip == expected_ip:
                 print("info:     DNS propagation successful!")
-                return True
+                # Do one more check after a short delay to be sure
+                await asyncio.sleep(5)
+                try:
+                    double_check_ip = socket.gethostbyname(hostname)
+                    if double_check_ip == expected_ip:
+                        print("info:     DNS propagation confirmed with double-check!")
+                        return True
+                    else:
+                        print(f"warn:     DNS double-check failed, resolved to {double_check_ip}, continuing to wait...")
+                except socket.gaierror:
+                    print("warn:     DNS double-check failed with lookup error, continuing to wait...")
             else:
-                print(f"debug:    DNS resolved to {resolved_ip}, waiting...")
-        except socket.gaierror:
-            print("debug:    DNS record not found yet, waiting...")
+                print(f"debug:    DNS resolved to {resolved_ip}, expected {expected_ip}, waiting... (attempt {i+1}/30)")
+        except socket.gaierror as e:
+            print(f"debug:    DNS record not found yet, waiting... (attempt {i+1}/30) - {e}")
         
         await asyncio.sleep(10)
         
-    print(f"error:    DNS for {hostname} did not propagate to {expected_ip} in time.")
+    print(f"error:    DNS for {hostname} did not propagate to {expected_ip} in time (waited 5 minutes).")
+    print(f"error:    This may indicate a DNS configuration issue.")
     return False
+
+def setup_cloudflare_credentials():
+    """
+    Creates a Cloudflare credentials file for certbot to use for DNS challenges.
+    Returns the path to the credentials file.
+    """
+    # load cloudflare credentials from the same file the server uses
+    try:
+        from server.components.dns import CLOUDFLARE_API_TOKEN
+        if not CLOUDFLARE_API_TOKEN:
+            print("error:    Cloudflare API token not found in dns_secrets.json")
+            return None
+    except ImportError:
+        print("error:    Could not import Cloudflare credentials")
+        return None
+    
+    # create credentials file for certbot
+    creds_path = "/tmp/cloudflare-credentials.ini"
+    try:
+        with open(creds_path, "w") as f:
+            f.write(f"dns_cloudflare_api_token = {CLOUDFLARE_API_TOKEN}\n")
+        
+        # set restrictive permissions for security
+        os.chmod(creds_path, 0o600)
+        print(f"info:     Created Cloudflare credentials file at {creds_path}")
+        return creds_path
+    except Exception as e:
+        print(f"error:    Failed to create Cloudflare credentials file: {e}")
+        return None
 
 def run_certbot(hostname: str, email: str):
     """
-    Executes Certbot to obtain/renew an SSL certificate for the node's hostname.
-    Assumes Certbot is installed on the system.
+    Executes Certbot to obtain/renew an SSL certificate using DNS challenge.
+    This works even when port 80 is not accessible.
     """
-    print("info:     Running Certbot to obtain SSL certificate...")
-    # This command tells Certbot to get a certificate using the webroot plugin,
-    # placing its challenge files where our FastAPI app can serve them.
-    # The ACME_CHALLENGE_DIR must match the one in tunnel_node/main.py
-    ACME_CHALLENGE_DIR = "/tmp/acme-challenges"
-    command = [
-        "certbot", "certonly",
-        "--webroot", "-w", ACME_CHALLENGE_DIR,
-        "-d", hostname,
-        "--agree-tos",
-        "-n",  # Non-interactive
-        "-m", email,
-        "--no-eff-email", # Don't ask to be on the EFF mailing list
-        "--cert-name", hostname # Ensures we renew the correct cert
-    ]
+    print("info:     Running Certbot with DNS challenge to obtain SSL certificate...")
+    
+    # setup cloudflare credentials file
+    creds_file = setup_cloudflare_credentials()
+    if not creds_file:
+        print("error:    Cannot proceed without Cloudflare credentials")
+        return False
+    
     try:
-        # Using check=True will raise an exception if Certbot fails
-        subprocess.run(command, check=True, capture_output=True, text=True)
-        print("info:     Certbot run successful.")
+        # first, check if certbot-dns-cloudflare plugin is installed
+        check_plugin_cmd = ["certbot", "plugins"]
+        result = subprocess.run(check_plugin_cmd, capture_output=True, text=True)
+        if "dns-cloudflare" not in result.stdout:
+            print("error:    certbot-dns-cloudflare plugin not found. Installing...")
+            install_cmd = ["pip", "install", "certbot-dns-cloudflare"]
+            subprocess.run(install_cmd, check=True)
+            print("info:     certbot-dns-cloudflare plugin installed successfully")
+        
+        # use dns challenge with cloudflare
+        command = [
+            "certbot", "certonly",
+            "--dns-cloudflare",
+            "--dns-cloudflare-credentials", creds_file,
+            "--dns-cloudflare-propagation-seconds", "60",  # wait for dns propagation
+            "-d", hostname,
+            "--agree-tos",
+            "-n",  # non-interactive
+            "-m", email,
+            "--no-eff-email",  # don't ask to be on the eff mailing list
+            "--cert-name", hostname,  # ensures we renew the correct cert
+            "--verbose"  # more detailed output for debugging
+        ]
+        
+        print(f"info:     Certbot DNS challenge command: {' '.join(command)}")
+        
+        # using check=True will raise an exception if certbot fails
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        print("info:     Certbot DNS challenge run successful.")
+        if result.stdout:
+            print(f"debug:    Certbot stdout: {result.stdout}")
         return True
+        
     except FileNotFoundError:
         print("error:    'certbot' command not found. Please ensure it is installed and in the system's PATH.")
         return False
     except subprocess.CalledProcessError as e:
-        print("error:    Certbot failed.")
+        print("error:    Certbot DNS challenge failed.")
         print(f"Certbot stdout: {e.stdout}")
         print(f"Certbot stderr: {e.stderr}")
+        print(f"Certbot return code: {e.returncode}")
         return False
+    finally:
+        # clean up credentials file for security
+        try:
+            if creds_file and os.path.exists(creds_file):
+                os.remove(creds_file)
+                print("info:     Cleaned up temporary credentials file")
+        except Exception as e:
+            print(f"warn:     Could not clean up credentials file: {e}")
 
 async def get_self_node_record():
     """Fetches the full details for this node from the main server."""
@@ -164,37 +235,55 @@ async def main_startup_flow():
     # We will use the first port in the assigned range for the main server
     main_server_port = port_range[0]
 
-    # 2. Determine public IP and update DNS via the server
+    # 2. Determine public IP and update DNS via the server (with retries)
     public_ip = await get_public_ip()
     if not public_ip:
         print("critical: Could not determine public IP. Exiting.")
         return
-        
-    if not await update_dns_record(public_ip):
-        print("critical: Could not update DNS record. Exiting.")
-        return
 
-    # 3. Wait for the DNS change to propagate
+    print("info:     Attempting to update DNS record (will retry if needed)...")
+    dns_updated = False
+    for attempt in range(5):  # try up to 5 times
+        print(f"info:     DNS update attempt {attempt + 1}/5...")
+        if await update_dns_record(public_ip):
+            dns_updated = True
+            break
+        else:
+            print(f"warn:     DNS update attempt {attempt + 1} failed, waiting 30 seconds before retry...")
+            await asyncio.sleep(30)
+    
+    if not dns_updated:
+        print("error:    All DNS update attempts failed, but continuing to check if DNS resolves correctly...")
+    
+    # 3. Wait for the DNS change to propagate (regardless of update API success)
+    print("info:     Checking DNS propagation...")
     if not await wait_for_dns_propagation(hostname, public_ip):
-        print("critical: DNS did not propagate. Tunnel will not be reachable. Exiting.")
+        print("critical: DNS propagation failed. Cannot obtain SSL certificate without working DNS.")
+        print("critical: Please check your DNS configuration and try again.")
         return
 
-    # 4. Run Certbot to get/renew SSL certificates
+    # 4. Now that DNS is working, proceed with SSL certificate using DNS challenge
+    print("info:     DNS propagation confirmed. Proceeding with SSL certificate using DNS challenge...")
+
+    # 5. Run Certbot to get/renew SSL certificates using DNS challenge
     cert_path = f"/etc/letsencrypt/live/{hostname}/fullchain.pem"
     key_path = f"/etc/letsencrypt/live/{hostname}/privkey.pem"
 
-    # We can force a renewal check, or just run it if the cert doesn't exist.
-    # Certbot is smart enough not to re-issue if the cert is still valid.
+    # DNS challenge doesn't require any local server - it uses Cloudflare API directly
+    print("info:     Attempting to obtain SSL certificate using DNS challenge...")
     if not run_certbot(hostname, admin_email):
         print("critical: Could not obtain SSL certificate. Cannot start production server.")
         return
 
-    # 5. Final check for certificate files
+    # 6. Final check for certificate files
     if not (os.path.exists(cert_path) and os.path.exists(key_path)):
         print(f"critical: SSL certificates not found at expected path after Certbot run. Aborting.")
         return
 
-    # 6. Start the production Uvicorn server with the new SSL certs
+    print("info:     SSL certificate obtained successfully!")
+    print("info:     Node setup complete - DNS propagated and SSL certificate ready!")
+
+    # 7. Start the production Uvicorn server with the new SSL certs
     print(f"info:     Starting production server for {hostname} on port {main_server_port} with SSL...")
     
     uvicorn.run(
@@ -430,6 +519,7 @@ def run_temp_api_server():
         print(f"error: failed to start temporary server: {e}")
         import traceback
         print(f"traceback: {traceback.format_exc()}")
+
 
 def get_node_cert() -> str:
     """gets the stored node certificate"""
