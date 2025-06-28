@@ -536,6 +536,7 @@ def run_background_service(updated_public_address: str):
         
         # NOTE: THIS IS THE WORKAROUND. The server expects an api_key.
         control_uri = f"{ws_url}/internal/control/ws?api_key={node_secret_id}"
+        print(f"debug:    attempting to connect to: {control_uri}")
         
         attempts = 0
         max_attempts = 5
@@ -590,12 +591,32 @@ async def main():
     # check if we're already a registered node
     node_cert = get_node_cert()
     if node_cert:
-        print("info:     node certificate found, proceeding with production startup...")
+        print("info:     node certificate found, running full production startup with DNS and SSL...")
         await main_startup_flow()
     else:
         print("info:     node certificate not found, starting registration process...")
         node_secret_id = get_node_secret_id()
-        asyncio.run(run_interactive_registration(node_secret_id))
+        
+        # run a temporary http server in the background to handle registration challenges
+        temp_server_process = Process(target=run_temp_api_server, daemon=True)
+        temp_server_process.start()
+        await asyncio.sleep(2) # give it a moment to start up
+        
+        # run the registration flow
+        registration_successful = await run_interactive_registration(node_secret_id)
+        
+        # stop the temp server
+        print("info:     terminating temporary api server...")
+        temp_server_process.terminate()
+        temp_server_process.join(timeout=5)
+
+        if not registration_successful:
+            sys.exit("error:    registration failed.")
+        else:
+            print("info:     registration successful! proceeding to production startup.")
+            # after successful registration, we must proceed to the main startup flow
+            # which handles DNS, certs, and the final server launch.
+            await main_startup_flow()
 
 
 if __name__ == "__main__":

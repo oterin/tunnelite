@@ -178,6 +178,7 @@ async def node_control_channel_task():
             # WORKAROUND: connect to the api_key endpoint the server expects
             control_uri = f"{ws_url}/internal/control/ws?api_key={NODE_SECRET_ID}"
             print(f"info:     connecting to control channel (attempt {retry_count + 1})")
+            print(f"debug:    control channel URI: {control_uri}")
                 
             async with websockets.connect(control_uri, ssl=True) as websocket:
                 print("info:     node control channel connected successfully.")
