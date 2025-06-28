@@ -231,7 +231,7 @@ async def handle_http_request(local_port: int, request_data: bytes) -> bytes:
         reader, writer = await asyncio.open_connection('127.0.0.1', local_port)
         writer.write(request_data)
         await writer.drain()
-        
+
         response_data = b""
         while True:
             chunk = await reader.read(4096)
@@ -250,7 +250,7 @@ async def handle_http_request(local_port: int, request_data: bytes) -> bytes:
 async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
     """run tunnel with beautiful centered tui"""
     headers = {"x-api-key": api_key}
-    
+
     # state variables
     request_count = 0
     bytes_in = 0
@@ -684,21 +684,21 @@ def login_user():
     ) as progress:
         task = progress.add_task("  logging in...", total=None)
         
-        try:
-            res = requests.post(
-                f"{main_server_url}/auth/token",
-                data={"username": username, "password": password}
-            )
-            res.raise_for_status()
-            api_key = res.json()["api_key"]
-            save_api_key(api_key)
-            progress.stop_task(task)
-            console.print(Align.center("✓ login successful"))
+    try:
+        res = requests.post(
+            f"{main_server_url}/auth/token",
+            data={"username": username, "password": password}
+        )
+        res.raise_for_status()
+        api_key = res.json()["api_key"]
+        save_api_key(api_key)
+        progress.stop_task(task)
+        console.print(Align.center("✓ login successful"))
             
-        except requests.RequestException as e:
-            progress.stop_task(task)
-            error_msg = e.response.text if e.response else str(e)
-            console.print(Align.center(f"✗ login failed: {error_msg}"))
+    except requests.RequestException as e:
+        progress.stop_task(task)
+        error_msg = e.response.text if e.response else str(e)
+        console.print(Align.center(f"✗ login failed: {error_msg}"))
     
     console.print()
     input("press enter to continue...")
@@ -831,7 +831,7 @@ def quick(
     if not api_key:
         console.print("error: not logged in. run 'python client.py tui' to login first.")
         return
-    
+
     try:
         asyncio.run(run_tunnel(api_key, tunnel_type, port))
     except KeyboardInterrupt:

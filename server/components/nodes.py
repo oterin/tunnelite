@@ -1,11 +1,11 @@
 import time
 from typing import List, Optional
 import requests
-from fastapi import APIRouter, Request, Header, HTTPException, status
+from fastapi import APIRouter, Request, Header, HTTPException, status, Query
 from pydantic import BaseModel, Field
 
 from server.components import database
-from server.components.models import Node
+from server.components.models import Node, Tunnel
 from server import security
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
@@ -103,3 +103,45 @@ async def node_heartbeat(node_info: NodeInfo, x_node_cert: str = Header(...)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"invalid node certificate: {e}"
         )
+
+@router.post("/verify-tunnel-activation", response_model=Tunnel)
+async def verify_tunnel_activation(
+    request: Request,
+    tunnel_id: str = Query(...),
+    x_node_secret_id: str = Header(...)
+):
+    """
+    Called by a tunnel node to verify a tunnel activation request it received from a client.
+    The node needs to confirm with the main server that this tunnel is legitimate.
+    """
+    # 1. authenticate the node
+    node = database.get_node_by_secret_id(x_node_secret_id)
+    if not node or node.get("status") != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="node not authorized or not active."
+        )
+
+    # 2. find the requested tunnel
+    tunnel = database.get_tunnel_by_id(tunnel_id)
+    if not tunnel:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="tunnel not found."
+        )
+
+    # 3. verify the tunnel is pending and belongs to the calling node
+    if tunnel.get("status") != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"tunnel is not in a pending state (current state: {tunnel.get('status')})."
+        )
+    
+    if tunnel.get("node_secret_id") != node.get("node_secret_id"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="tunnel is assigned to a different node."
+        )
+
+    # 4. if all checks pass, return the tunnel details to the node
+    return tunnel

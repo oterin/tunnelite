@@ -389,15 +389,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # 3. verify with main server
         print(f"info:     verifying activation for tunnel {tunnel_id} with main server...")
-        activation_payload = {
-            "tunnel_id": tunnel_id,
-            "api_key": api_key,
-            "node_secret_id": NODE_SECRET_ID
-        }
-        response = requests.post(
-            f"{config.MAIN_SERVER_URL}/internal/verify-activation",
-            json=activation_payload
-        )
+        
+        activation_url = f"{config.MAIN_SERVER_URL}/nodes/verify-tunnel-activation"
+        params = {"tunnel_id": tunnel_id}
+        headers = {"x-node-secret-id": NODE_SECRET_ID}
+
+        response = requests.post(activation_url, params=params, headers=headers)
 
         if not response.ok:
             error_detail = response.json().get("detail", "activation failed")
