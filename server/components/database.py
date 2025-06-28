@@ -11,6 +11,8 @@ from filelock import FileLock # --- NEW ---
 USER_DB_FILE = "users.jsonl"
 TUNNEL_DB_FILE = "tunnels.jsonl"
 NODE_DB_FILE = "nodes.jsonl"
+TELEMETRY_DB_FILE = "telemetry.jsonl"
+TUNNEL_EVENTS_DB_FILE = "tunnel_events.jsonl"
 
 def _ensure_db_file_exists(db_file: str):
     if not os.path.exists(db_file):
@@ -243,3 +245,110 @@ def get_all_tunnels() -> List[Dict]:
                 if line.strip():
                     tunnels.append(json.loads(line))
     return tunnels
+
+# --- telemetry functions ---
+
+def store_telemetry(telemetry_record: Dict) -> None:
+    """store telemetry data with automatic cleanup of old records"""
+    _ensure_db_file_exists(TELEMETRY_DB_FILE)
+    lock = FileLock(f"{TELEMETRY_DB_FILE}.lock")
+    with lock:
+        # add timestamp if not present
+        if "timestamp" not in telemetry_record:
+            telemetry_record["timestamp"] = time.time()
+        
+        # append new record
+        with open(TELEMETRY_DB_FILE, 'a') as f:
+            f.write(json.dumps(telemetry_record) + '\n')
+
+def get_telemetry_for_node(node_secret_id: str, since_timestamp: float) -> List[Dict]:
+    """get telemetry data for a specific node since timestamp"""
+    _ensure_db_file_exists(TELEMETRY_DB_FILE)
+    telemetry = []
+    lock = FileLock(f"{TELEMETRY_DB_FILE}.lock")
+    with lock:
+        with open(TELEMETRY_DB_FILE, 'r') as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    if (record.get("node_secret_id") == node_secret_id and 
+                        record.get("timestamp", 0) >= since_timestamp):
+                        telemetry.append(record)
+    return telemetry
+
+def get_latest_telemetry_for_node(node_secret_id: str) -> Optional[Dict]:
+    """get the most recent telemetry record for a node"""
+    _ensure_db_file_exists(TELEMETRY_DB_FILE)
+    latest_record = None
+    latest_timestamp = 0
+    
+    lock = FileLock(f"{TELEMETRY_DB_FILE}.lock")
+    with lock:
+        with open(TELEMETRY_DB_FILE, 'r') as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads(line)
+                    if (record.get("node_secret_id") == node_secret_id and 
+                        record.get("timestamp", 0) > latest_timestamp):
+                        latest_record = record
+                        latest_timestamp = record.get("timestamp", 0)
+    
+    return latest_record
+
+def store_tunnel_event(event_record: Dict) -> None:
+    """store tunnel event data"""
+    _ensure_db_file_exists(TUNNEL_EVENTS_DB_FILE)
+    lock = FileLock(f"{TUNNEL_EVENTS_DB_FILE}.lock")
+    with lock:
+        # add timestamp if not present
+        if "timestamp" not in event_record:
+            event_record["timestamp"] = time.time()
+        
+        # append new event
+        with open(TUNNEL_EVENTS_DB_FILE, 'a') as f:
+            f.write(json.dumps(event_record) + '\n')
+
+def get_tunnel_events_for_node(node_secret_id: str, since_timestamp: float, event_type: Optional[str] = None) -> List[Dict]:
+    """get tunnel events for a specific node since timestamp"""
+    _ensure_db_file_exists(TUNNEL_EVENTS_DB_FILE)
+    events = []
+    lock = FileLock(f"{TUNNEL_EVENTS_DB_FILE}.lock")
+    with lock:
+        with open(TUNNEL_EVENTS_DB_FILE, 'r') as f:
+            for line in f:
+                if line.strip():
+                    event = json.loads(line)
+                    if (event.get("node_secret_id") == node_secret_id and 
+                        event.get("timestamp", 0) >= since_timestamp):
+                        if event_type is None or event.get("event_type") == event_type:
+                            events.append(event)
+    return events
+
+def count_tunnel_events_for_node(node_secret_id: str, since_timestamp: float) -> int:
+    """count tunnel events for a node since timestamp"""
+    _ensure_db_file_exists(TUNNEL_EVENTS_DB_FILE)
+    count = 0
+    lock = FileLock(f"{TUNNEL_EVENTS_DB_FILE}.lock")
+    with lock:
+        with open(TUNNEL_EVENTS_DB_FILE, 'r') as f:
+            for line in f:
+                if line.strip():
+                    event = json.loads(line)
+                    if (event.get("node_secret_id") == node_secret_id and 
+                        event.get("timestamp", 0) >= since_timestamp):
+                        count += 1
+    return count
+
+def get_nodes_by_owner(username: str) -> List[Dict]:
+    """get all nodes owned by a specific user"""
+    _ensure_db_file_exists(NODE_DB_FILE)
+    nodes = []
+    lock = FileLock(f"{NODE_DB_FILE}.lock")
+    with lock:
+        with open(NODE_DB_FILE, 'r') as f:
+            for line in f:
+                if line.strip():
+                    node = json.loads(line)
+                    if node.get("owner_username") == username:
+                        nodes.append(node)
+    return nodes

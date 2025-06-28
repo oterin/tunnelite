@@ -26,12 +26,12 @@ NODE_SECRET_ID = None
 try:
     with open(SECRET_ID_FILE, "r") as f:
         NODE_SECRET_ID = f.read().strip()
-    print(f"info:     loaded existing node secret id: {NODE_SECRET_ID}")
+    print(f"info:     loaded existing node secret id")
 except FileNotFoundError:
     NODE_SECRET_ID = str(uuid.uuid4())
     with open(SECRET_ID_FILE, "w") as f:
         f.write(NODE_SECRET_ID)
-    print(f"info:     generated new node secret id: {NODE_SECRET_ID}")
+    print(f"info:     generated new node secret id")
 
 app = FastAPI(
     title=f"tunnelite node",

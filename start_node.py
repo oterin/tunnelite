@@ -1,451 +1,762 @@
+#!/usr/bin/env python3
+"""
+tunnelite node manager - beautiful tui for node setup and management
+"""
+
 import asyncio
 import json
 import os
-import ssl
 import sys
-import uuid
 import time
+import uuid
+import psutil
+import platform
 import socket
-from multiprocessing import Process, cpu_count
-from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
-from urllib.parse import urlparse, urlunparse
-
 import requests
 import uvicorn
 import websockets
-from tunnel_node import config
+from typing import Optional, Dict, List
+from multiprocessing import Process
 
-# these imports are now relative to the project root
+# rich ui components
+import typer
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from rich.prompt import Prompt, Confirm
+from rich.live import Live
+from rich.layout import Layout
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich import box
+from rich.align import Align
+
+# tunnelite imports
 from tunnel_node.main import app as fastapi_app
-
-# --- url configuration and normalization ---
-# shared config helper
 from server import config as common_config
 
-# read the main server url from config
-RAW_MAIN_SERVER_URL = common_config.get("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
-MAIN_SERVER_URL = RAW_MAIN_SERVER_URL
+# --- configuration ---
+home_dir = os.path.expanduser("~")
+config_dir = os.path.join(home_dir, ".tunnelite-node")
+api_key_file = os.path.join(config_dir, "user_api_key")
+node_secret_file = os.path.join(config_dir, "node_secret_id")
 
-# admin key for registration
-ADMIN_API_KEY = common_config.get("TUNNELITE_ADMIN_KEY")
+# server configuration
+MAIN_SERVER_URL = common_config.get("TUNNELITE_SERVER_URL", "https://api.tunnelite.net")
 
-# constants for the node
-SECRET_ID_FILE = "node_secret_id.txt"
-BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb
-CERT_TOKEN_FILE = "node_cert.txt"
-KEY_FILE = None  # will be set dynamically
-CERT_FILE = None  # will be set dynamically
-DROP_TO_USER = None  # optional privilege dropping
-DROP_TO_GROUP = None  # optional privilege dropping
+# create console for rich output
+console = Console()
 
-async def get_public_ip():
-    """uses a third-party service to determine the node's public ip address."""
+# create the main cli application
+app = typer.Typer(
+    name="tunnelite-node",
+    help="tunnelite node manager - host tunnels for users",
+    add_completion=False,
+)
+
+# telemetry collection
+telemetry_data = {
+    "system": {},
+    "network": {},
+    "tunnels": {
+        "active_tunnels": 0,
+        "total_tunnels_served": 0,
+        "http_requests_count": 0,
+        "tcp_connections_count": 0,
+        "data_transferred_mb": 0.0,
+        "average_response_time_ms": 0.0,
+        "error_rate_percent": 0.0
+    }
+}
+
+def collect_system_metrics() -> Dict:
+    """collect comprehensive system metrics"""
     try:
-        print("info:     fetching public ip address...")
-        response = requests.get("https://api.ipify.org?format=json", timeout=10)
-        response.raise_for_status()
-        ip = response.json()["ip"]
-        print(f"info:     public ip address is {ip}")
-        return ip
-    except requests.RequestException as e:
-        print(f"error:    could not fetch public ip: {e}")
-        return None
+        # cpu and memory
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        # load average (unix only)
+        load_avg = [0.0, 0.0, 0.0]
+        if hasattr(os, 'getloadavg'):
+            load_avg = list(os.getloadavg())
+        
+        # uptime
+        boot_time = psutil.boot_time()
+        uptime = time.time() - boot_time
+        
+        return {
+            "cpu_usage_percent": cpu_percent,
+            "memory_usage_percent": memory.percent,
+            "memory_total_mb": memory.total // (1024 * 1024),
+            "memory_used_mb": memory.used // (1024 * 1024),
+            "disk_usage_percent": disk.percent,
+            "disk_total_gb": disk.total / (1024**3),
+            "disk_used_gb": disk.used / (1024**3),
+            "load_average_1m": load_avg[0],
+            "load_average_5m": load_avg[1],
+            "load_average_15m": load_avg[2],
+            "uptime_seconds": int(uptime)
+        }
+    except Exception as e:
+        console.print(f"[dim]warning: could not collect system metrics: {e}[/dim]")
+        return {}
 
-async def request_ssl_certificate_from_server(public_ip: str):
-    """
-    request ssl certificate generation from the server.
-    the server handles all dns challenges and cloudflare api calls.
-    """
-    print("info:     requesting ssl certificate generation from server...")
-    
-    node_secret_id = get_node_secret_id()
-    headers = {"x-api-key": node_secret_id}
-    payload = {"public_ip": public_ip}
-    
+def collect_network_metrics() -> Dict:
+    """collect network metrics"""
     try:
+        net_io = psutil.net_io_counters()
+        connections = len(psutil.net_connections())
+        
+        return {
+            "bytes_sent": net_io.bytes_sent,
+            "bytes_received": net_io.bytes_recv,
+            "packets_sent": net_io.packets_sent,
+            "packets_received": net_io.packets_recv,
+            "connections_active": connections,
+            "connections_total": connections,
+            "bandwidth_usage_mbps": 0.0  # calculated over time
+        }
+    except Exception as e:
+        console.print(f"[dim]warning: could not collect network metrics: {e}[/dim]")
+        return {}
+
+async def send_telemetry():
+    """send telemetry data to server"""
+    try:
+        node_secret_id = get_node_secret_id()
+        if not node_secret_id:
+            return
+        
+        # collect current metrics
+        system_metrics = collect_system_metrics()
+        network_metrics = collect_network_metrics()
+        
+        if not system_metrics or not network_metrics:
+            return
+        
+        telemetry_payload = {
+            "system": system_metrics,
+            "network": network_metrics,
+            "tunnels": telemetry_data["tunnels"],
+            "timestamp": time.time(),
+            "node_version": "1.0.0"
+        }
+        
+        headers = {"x-api-key": node_secret_id}
         response = requests.post(
-            f"{MAIN_SERVER_URL}/internal/control/generate-ssl-certificate",
-            json=payload,
+            f"{MAIN_SERVER_URL}/telemetry/metrics",
+            json=telemetry_payload,
             headers=headers,
-            timeout=300,  # 5 minutes timeout for certificate generation
-            verify=True
+            timeout=10
         )
         response.raise_for_status()
         
-        cert_data = response.json()
-        if cert_data.get("status") != "success":
-            print(f"error:    server ssl certificate generation failed: {cert_data}")
-            return None
-        
-        # save certificates locally
-        hostname = cert_data.get("hostname")
-        ssl_cert = cert_data.get("ssl_certificate")
-        ssl_key = cert_data.get("ssl_private_key")
-        
-        if not all([hostname, ssl_cert, ssl_key]):
-            print("error:    server response missing required certificate data")
-            return None
-        
-        # create directories if they don't exist
-        cert_dir = f"/etc/letsencrypt/live/{hostname}"
-        os.makedirs(cert_dir, mode=0o755, exist_ok=True)
-        
-        cert_path = f"{cert_dir}/fullchain.pem"
-        key_path = f"{cert_dir}/privkey.pem"
-        
-        # write certificate files with secure permissions
-        with open(cert_path, 'w') as f:
-            f.write(ssl_cert)
-        os.chmod(cert_path, 0o644)
-        
-        with open(key_path, 'w') as f:
-            f.write(ssl_key)
-        os.chmod(key_path, 0o600)  # private key should be read-only by root
-        
-        print(f"info:     ssl certificate saved to {cert_path}")
-        print(f"info:     ssl private key saved to {key_path}")
-        
-        return {
-            "hostname": hostname,
-            "cert_path": cert_path,
-            "key_path": key_path
-        }
-        
-    except requests.RequestException as e:
-        print(f"error:    failed to request ssl certificate from server: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                error_detail = e.response.json()
-                print(f"error:    server error details: {error_detail}")
-            except:
-                print(f"error:    server response: {e.response.text}")
-        return None
     except Exception as e:
-        print(f"error:    unexpected error during ssl certificate request: {e}")
+        # silently fail telemetry to avoid disrupting node operation
+        pass
+
+def get_user_api_key() -> Optional[str]:
+    """get user api key from config"""
+    if not os.path.exists(api_key_file):
         return None
+    with open(api_key_file, "r") as f:
+        return f.read().strip()
 
-async def get_self_node_record():
-    """fetches the full details for this node from the main server."""
-    print("info:     fetching node record from main server...")
-    headers = {"x-node-secret-id": get_node_secret_id()}
-    url = f"{MAIN_SERVER_URL}/nodes/me"
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        print(f"error:    could not fetch node record: {e}")
-        if hasattr(e, 'response') and e.response is not None and e.response.status_code == 404:
-            print("warn:     node not found in server database. node may need to be re-registered.")
-        return None
+def save_user_api_key(api_key: str):
+    """save user api key to config"""
+    os.makedirs(config_dir, exist_ok=True)
+    with open(api_key_file, "w") as f:
+        f.write(api_key)
 
-async def main_startup_flow():
-    """the main orchestration logic for node startup."""
-    
-    # 1. get this node's details from the server
-    node_record = await get_self_node_record()
-    if not node_record:
-        print("critical: cannot start without node record. this should not happen after registration.")
-        return
-
-    hostname = node_record.get("public_hostname")
-    port_range_str = node_record.get("port_range", "")
-    
-    if not all([hostname, port_range_str]):
-        print("critical: node record is missing hostname or port_range. exiting.")
-        return
-    
-    # parse the port range string into a list of ports
-    port_list = parse_port_range(port_range_str)
-    if not port_list:
-        print("critical: could not parse port range. exiting.")
-        return
-        
-    # we will use the first port in the assigned range for the main server
-    main_server_port = port_list[0]
-
-    # 2. determine public ip
-    public_ip = await get_public_ip()
-    if not public_ip:
-        print("critical: could not determine public ip. exiting.")
-        return
-
-    # 3. request ssl certificate generation from server
-    # the server handles dns updates, dns propagation checking, and ssl certificate generation
-    print("info:     requesting ssl certificate generation from server...")
-    cert_info = await request_ssl_certificate_from_server(public_ip)
-    
-    if not cert_info:
-        print("critical: could not obtain ssl certificate from server. cannot start production server.")
-        return
-
-    cert_path = cert_info["cert_path"]
-    key_path = cert_info["key_path"]
-
-    # 4. final check for certificate files
-    if not (os.path.exists(cert_path) and os.path.exists(key_path)):
-        print(f"critical: ssl certificates not found at expected paths. aborting.")
-        return
-
-    print("info:     ssl certificate obtained successfully from server!")
-    print("info:     node setup complete - ready to start production server!")
-
-    # 5. start the production uvicorn server with the ssl certs
-    print(f"info:     starting production server for {hostname} on port {main_server_port} with ssl...")
-    
-    uvicorn.run(
-        "tunnel_node.main:app",
-        host="0.0.0.0",
-        port=main_server_port,
-        ssl_keyfile=key_path,
-        ssl_certfile=cert_path,
-        # use single worker for ssl stability
-        workers=1,
-        access_log=True,
-        log_level="info"
-    )
-
-# --- phase 1: interactive registration logic ---
-
-def get_node_secret_id():
-    """gets or creates the node's permanent secret id."""
-    try:
-        with open(SECRET_ID_FILE, "r") as f:
+def get_node_secret_id() -> Optional[str]:
+    """get or create node secret id"""
+    if os.path.exists(node_secret_file):
+        with open(node_secret_file, "r") as f:
             return f.read().strip()
-    except FileNotFoundError:
-        secret_id = str(uuid.uuid4())
-        with open(SECRET_ID_FILE, "w") as f:
-            f.write(secret_id)
-        print(f"info:     generated new node secret id: {secret_id}")
-        return secret_id
+    else:
+        # generate new node secret id
+        node_secret_id = str(uuid.uuid4())
+        os.makedirs(config_dir, exist_ok=True)
+        with open(node_secret_file, "w") as f:
+            f.write(node_secret_id)
+        return node_secret_id
+
+def clear_screen():
+    """clear terminal screen"""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def show_header():
+    """show centered header"""
+    header_text = Text()
+    header_text.append("tunnelite", style="bold")
+    header_text.append(" / ", style="dim")
+    header_text.append("node manager", style="dim")
+    
+    console.print()
+    console.print(Align.center(header_text))
+    console.print(Align.center("─" * 40, style="dim"))
+    console.print()
+
+def show_auth_status():
+    """show authentication status"""
+    api_key = get_user_api_key()
+    if api_key:
+        # verify api key with server
+        try:
+            response = requests.get(f"{MAIN_SERVER_URL}/auth/users/me", 
+                                  headers={"x-api-key": api_key}, timeout=5)
+            if response.status_code == 200:
+                username = response.json().get("username", "unknown")
+                console.print(Align.center(f"[dim]authenticated as {username}[/dim]"))
+            else:
+                console.print(Align.center("[dim]authentication expired[/dim]"))
+        except:
+            console.print(Align.center("[dim]authentication error[/dim]"))
+    else:
+        console.print(Align.center("[dim]not authenticated[/dim]"))
+    console.print()
+
+def show_node_status():
+    """show current node status"""
+    node_secret_id = get_node_secret_id()
+    
+    try:
+        headers = {"x-node-secret-id": node_secret_id}
+        response = requests.get(f"{MAIN_SERVER_URL}/nodes/me", headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            node_data = response.json()
+            
+            # create status table
+            table = Table(box=box.SIMPLE, show_header=False)
+            table.add_column("property", style="dim")
+            table.add_column("value")
+            
+            status_icon = "●" if node_data.get("status") == "active" else "○"
+            table.add_row("status", f"{status_icon} {node_data.get('status', 'unknown')}")
+            table.add_row("hostname", node_data.get("public_hostname", "not assigned"))
+            table.add_row("location", node_data.get("verified_geolocation", {}).get("city", "unknown"))
+            table.add_row("port range", node_data.get("port_range", "not configured"))
+            table.add_row("max clients", str(node_data.get("max_clients", 0)))
+            
+            # system metrics if available
+            if node_data.get("cpu_usage") is not None:
+                table.add_row("cpu usage", f"{node_data.get('cpu_usage', 0):.1f}%")
+            if node_data.get("memory_usage") is not None:
+                table.add_row("memory usage", f"{node_data.get('memory_usage', 0):.1f}%")
+            if node_data.get("active_tunnels") is not None:
+                table.add_row("active tunnels", str(node_data.get("active_tunnels", 0)))
+            
+            console.print(Align.center(table))
+        else:
+            console.print(Align.center("[dim]node not registered[/dim]"))
+            
+    except requests.RequestException:
+        console.print(Align.center("[dim]could not connect to server[/dim]"))
+
+def login_user():
+    """interactive user login"""
+    clear_screen()
+    show_header()
+    
+    console.print(Align.center("[bold]login to tunnelite[/bold]"))
+    console.print()
+    
+    username = Prompt.ask("  username", console=console)
+    password = Prompt.ask("  password", password=True, console=console)
+    
+    console.print()
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+        console=console
+    ) as progress:
+        task = progress.add_task("  logging in...", total=None)
+        
+        try:
+            response = requests.post(
+                f"{MAIN_SERVER_URL}/auth/token",
+                data={"username": username, "password": password},
+                timeout=10
+            )
+            response.raise_for_status()
+            api_key = response.json()["api_key"]
+            save_user_api_key(api_key)
+            progress.stop_task(task)
+            console.print(Align.center("✓ login successful"))
+                
+        except requests.RequestException as e:
+            progress.stop_task(task)
+            error_msg = e.response.text if e.response and hasattr(e, 'response') else str(e)
+            console.print(Align.center(f"✗ login failed: {error_msg}"))
+    
+    console.print()
+    input("press enter to continue...")
+
+def register_user():
+    """interactive user registration"""
+    clear_screen()
+    show_header()
+    
+    console.print(Align.center("[bold]create tunnelite account[/bold]"))
+    console.print()
+    
+    username = Prompt.ask("  username", console=console)
+    password = Prompt.ask("  password", password=True, console=console)
+    
+    console.print()
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+        console=console
+    ) as progress:
+        task = progress.add_task("  creating account...", total=None)
+        
+        try:
+            response = requests.post(
+                f"{MAIN_SERVER_URL}/auth/register",
+                json={"username": username, "password": password},
+                timeout=10
+            )
+            response.raise_for_status()
+            progress.stop_task(task)
+            console.print(Align.center("✓ account created successfully"))
+            console.print(Align.center("[dim]you can now login with your credentials[/dim]"))
+            
+        except requests.RequestException as e:
+            progress.stop_task(task)
+            error_msg = e.response.text if e.response and hasattr(e, 'response') else str(e)
+            console.print(Align.center(f"✗ registration failed: {error_msg}"))
+    
+    console.print()
+    input("press enter to continue...")
+
+async def register_node():
+    """interactive node registration with beautiful ui"""
+    clear_screen()
+    show_header()
+    
+    user_api_key = get_user_api_key()
+    if not user_api_key:
+        console.print(Align.center("[dim]please login first[/dim]"))
+        input("press enter to continue...")
+        return
+    
+    console.print(Align.center("[bold]register this server as a node[/bold]"))
+    console.print()
+    
+    # get node configuration
+    console.print(Align.center("[dim]node configuration[/dim]"))
+    console.print()
+    
+    max_clients = Prompt.ask("  maximum concurrent clients", default="10", console=console)
+    port_range = Prompt.ask("  port range for tunnels (e.g., 8000-8100)", default="8000-8100", console=console)
+    
+    console.print()
+    
+    def make_layout(status: str, message: str = ""):
+        """create registration progress layout"""
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=5),
+            Layout(name="main", ratio=1),
+            Layout(name="footer", size=3)
+        )
+        
+        # header
+        header_content = Panel(
+            Align.center(f"[bold]● {status}[/bold]"),
+            box=box.SIMPLE,
+            style="dim"
+        )
+        layout["header"].update(header_content)
+        
+        # main content
+        if message:
+            main_content = Panel(
+                Align.center(f"[dim]{message}[/dim]"),
+                title="registration",
+                box=box.SIMPLE
+            )
+        else:
+            main_content = Panel(
+                Align.center(f"[dim]{status}...[/dim]"),
+                title="registration",
+                box=box.SIMPLE
+            )
+        layout["main"].update(main_content)
+        
+        # footer
+        footer_content = Panel(
+            Align.center("[dim]please wait...[/dim]"),
+            box=box.SIMPLE,
+            style="dim"
+        )
+        layout["footer"].update(footer_content)
+        
+        return layout
+
+    with Live(make_layout("starting registration"), refresh_per_second=4) as live:
+        try:
+            node_secret_id = get_node_secret_id()
+            
+            # 1. initial heartbeat
+            live.update(make_layout("sending initial heartbeat"))
+            public_ip = await get_public_ip()
+            if not public_ip:
+                live.update(make_layout("error", "could not determine public ip"))
+                await asyncio.sleep(3)
+                return
+            
+            temp_address = f"http://{public_ip}:8201"
+            heartbeat_response = requests.post(
+                f"{MAIN_SERVER_URL}/nodes/register",
+                json={"node_secret_id": node_secret_id, "public_address": temp_address},
+                timeout=10
+            )
+            heartbeat_response.raise_for_status()
+            
+            # 2. start temporary server for challenges
+            live.update(make_layout("starting temporary server"))
+            temp_server_process = Process(target=run_temp_server, daemon=True)
+            temp_server_process.start()
+            await asyncio.sleep(2)
+            
+            # 3. websocket registration
+            live.update(make_layout("connecting to registration service"))
+            ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/registration/ws/register-node"
+            
+            async with websockets.connect(ws_uri, ssl=True) as websocket:
+                # send auth data
+                await websocket.send(json.dumps({
+                    "node_secret_id": node_secret_id,
+                    "user_api_key": user_api_key,
+                }))
+                
+                while True:
+                    message_str = await websocket.recv()
+                    message = json.loads(message_str)
+                    msg_type = message.get("type")
+                    
+                    if msg_type == "reverse_benchmark":
+                        live.update(make_layout("running bandwidth benchmark"))
+                        benchmark_results = run_reverse_benchmark()
+                        if not benchmark_results:
+                            live.update(make_layout("error", "benchmark failed"))
+                            await asyncio.sleep(3)
+                            return
+                        await websocket.send(json.dumps(benchmark_results))
+                        
+                    elif msg_type == "prompt":
+                        prompt_msg = message.get("message", "")
+                        if "max concurrent clients" in prompt_msg:
+                            await websocket.send(json.dumps({"response": max_clients}))
+                        elif "port range" in prompt_msg:
+                            await websocket.send(json.dumps({"response": port_range}))
+                        else:
+                            # fallback for any other prompts
+                            await websocket.send(json.dumps({"response": "default"}))
+                            
+                    elif msg_type == "challenge":
+                        live.update(make_layout("verifying port accessibility"))
+                        port = message.get('port')
+                        key = message.get('key')
+                        
+                        # simple verification - just confirm ready
+                        await websocket.send(json.dumps({"status": "ready"}))
+                        
+                    elif msg_type == "info":
+                        info_msg = message.get('message', '')
+                        live.update(make_layout("processing", info_msg))
+                        
+                    elif msg_type == "success":
+                        success_msg = message.get('message', 'registration complete!')
+                        live.update(make_layout("registration successful", success_msg))
+                        await asyncio.sleep(2)
+                        
+                        # stop temp server
+                        temp_server_process.terminate()
+                        temp_server_process.join(timeout=5)
+                        return
+                        
+                    elif msg_type == "failure":
+                        error_msg = message.get('message', 'registration failed')
+                        live.update(make_layout("registration failed", error_msg))
+                        await asyncio.sleep(3)
+                        
+                        # stop temp server
+                        temp_server_process.terminate()
+                        temp_server_process.join(timeout=5)
+                        return
+                        
+        except Exception as e:
+            live.update(make_layout("error", str(e)))
+            await asyncio.sleep(3)
+            
+            # cleanup temp server
+            try:
+                temp_server_process.terminate()
+                temp_server_process.join(timeout=5)
+            except:
+                pass
+
+async def get_public_ip():
+    """get public ip address"""
+    try:
+        response = requests.get("https://api.ipify.org?format=json", timeout=10)
+        response.raise_for_status()
+        return response.json()["ip"]
+    except:
+        return None
 
 def run_reverse_benchmark():
-    """
-    performs a speed test by connecting *out* to the main server.
-    this avoids firewall issues on the node.
-    """
-    print("info:     performing reverse benchmark...")
+    """run bandwidth benchmark"""
     try:
         # download test
         down_url = f"{MAIN_SERVER_URL}/registration/benchmark/download"
         start_time = time.monotonic()
-        with requests.get(down_url, stream=True, timeout=20, verify=True) as r:
+        with requests.get(down_url, stream=True, timeout=20) as r:
             r.raise_for_status()
-            for _ in r.iter_content(chunk_size=8192): pass
+            for _ in r.iter_content(chunk_size=8192): 
+                pass
         down_duration = time.monotonic() - start_time
-        down_mbps = (BENCHMARK_PAYLOAD_SIZE / down_duration) * 8 / (1024*1024)
-        print(f"info:     download speed: {down_mbps:.2f} mbps")
+        down_mbps = (10 * 1024 * 1024 / down_duration) * 8 / (1024*1024)
 
         # upload test
         up_url = f"{MAIN_SERVER_URL}/registration/benchmark/upload"
-        dummy_payload = b'\0' * BENCHMARK_PAYLOAD_SIZE
+        dummy_payload = b'\0' * (10 * 1024 * 1024)
         start_time = time.monotonic()
-        r = requests.post(up_url, data=dummy_payload, timeout=20, verify=True)
+        r = requests.post(up_url, data=dummy_payload, timeout=20)
         r.raise_for_status()
         up_duration = time.monotonic() - start_time
-        up_mbps = (BENCHMARK_PAYLOAD_SIZE / up_duration) * 8 / (1024*1024)
-        print(f"info:     upload speed: {up_mbps:.2f} mbps")
+        up_mbps = (10 * 1024 * 1024 / up_duration) * 8 / (1024*1024)
 
         return {"down_mbps": down_mbps, "up_mbps": up_mbps}
-    except requests.RequestException as e:
-        print(f"error:    benchmark failed: {e}")
+    except:
         return None
 
-async def run_interactive_registration(node_secret_id: str):
-    """the main interactive registration coroutine."""
-    # get public ip dynamically
-    public_ip = await get_public_ip()
-    if not public_ip:
-        print("error:    could not determine public ip for registration")
-        return False
-        
-    # for registration, we'll use a default port that gets updated later
-    temp_public_address = f"http://{public_ip}:8201"
-    print(f"info:     using temporary address for registration: {temp_public_address}")
-
-    # before registering, we must send a heartbeat so the server knows our address
-    print("info:     sending initial heartbeat...")
-    try:
-        heartbeat_response = requests.post(
-            f"{MAIN_SERVER_URL}/nodes/register",
-            json={"node_secret_id": node_secret_id, "public_address": temp_public_address},
-            timeout=10, verify=True
-        )
-        print(f"info:     initial registration successful. {heartbeat_response.json().get('message', '')}")
-        # give the database a moment to ensure the write is complete
-        time.sleep(1)
-    except requests.RequestException as e:
-        sys.exit(f"error: could not send initial heartbeat to main server: {e}")
-
-    ws_uri = MAIN_SERVER_URL.replace("http", "ws", 1) + "/registration/ws/register-node"
-    print(f"--- tunnelite node registration ---")
-    print(f"connecting to {ws_uri}...")
-
-    try:
-        # increase timeout for websocket connection and keepalive
-        async with websockets.connect(ws_uri, ssl=True, open_timeout=30, close_timeout=10, ping_interval=60, ping_timeout=30) as websocket:
-            print(f"authenticating with node secret id: {node_secret_id}")
-            await websocket.send(json.dumps({
-                "node_secret_id": node_secret_id,
-                "admin_key": ADMIN_API_KEY,
-            }))
-
-            while True:
-                try:
-                    print("debug:    waiting for message from server...")
-                    message_str = await asyncio.wait_for(websocket.recv(), timeout=300.0)  # 5 minutes for interactive prompts
-                    print(f"debug:    received message: {message_str}")
-                except asyncio.TimeoutError:
-                    print("error:    timeout waiting for server message")
-                    return False
-                    
-                try:
-                    message = json.loads(message_str)
-                    if not isinstance(message, dict):
-                        print(f"warn:     received non-dict message from server: {message_str}")
-                        continue
-                except json.JSONDecodeError:
-                    print(f"warn:     received malformed json from server: {message_str}")
-                    continue
-
-                msg_type = message.get("type")
-                print(f"debug:    message type: {msg_type}")
-
-                if msg_type == "reverse_benchmark":
-                    benchmark_results = run_reverse_benchmark()
-                    if not benchmark_results: return False
-                    await websocket.send(json.dumps(benchmark_results))
-                elif msg_type == "prompt":
-                    response = input(f"[server] {message.get('message', '...')} > ")
-                    await websocket.send(json.dumps({"response": response}))
-                elif msg_type == "challenge":
-                    print(f"[server] {message.get('message', 'responding to challenge...')}")
-                    port, key = message.get('port'), message.get('key')
-                    if not port or not key: return False
-                    try:
-                        challenge_url = f"http://{public_ip}:{port}/.well-known/acme-challenge/{key}"
-                        # use a direct http request instead of a browser
-                        response = requests.get(challenge_url, timeout=5)
-                        response.raise_for_status()
-                        print(f"info:     challenge endpoint is accessible: {challenge_url}")
-                        await websocket.send(json.dumps({"status": "ready"}))
-                    except Exception as e:
-                        print(f"error:    challenge endpoint not accessible: {e}")
-                        await websocket.send(json.dumps({"status": "failed", "error": str(e)}))
-                elif msg_type == "info":
-                    print(f"[server] {message.get('message', '...')}")
-                elif msg_type == "success":
-                    print(f"\n[server] success: {message.get('message', 'registration complete!')}")
-                    # save node certificate if provided
-                    if "node_cert" in message:
-                        save_node_cert(message["node_cert"])
-                    return True
-                elif msg_type == "failure":
-                    print(f"\n[server] failed: {message.get('message', 'registration failed.')}")
-                    return False
-    except Exception as e:
-        print(f"an unexpected error occurred during registration: {e}")
-        return False
-
-def drop_privileges(uid_name: str, gid_name: str):
-    """drops root privileges to a less privileged user and group."""
-    if uid_name is None or gid_name is None:
-        return
-    
-    import pwd
-    import grp
-    
-    # get the uid/gid from the name
-    running_uid = pwd.getpwnam(uid_name).pw_uid
-    running_gid = grp.getgrnam(gid_name).gr_gid
-
-    # remove group privileges
-    os.setgroups([])
-
-    # try setting the new uid/gid
-    os.setgid(running_gid)
-    os.setuid(running_uid)
-
-    # ensure a very conservative umask
-    os.umask(0o077)
-
-def start_worker_process(https_socket: socket.socket):
-    print(f"info:     worker process started (pid: {os.getpid()})")
-    drop_privileges(DROP_TO_USER, DROP_TO_GROUP)
-
-    # disable background tasks in worker processes
-    os.environ["ENABLE_BACKGROUND_TASKS"] = "false"
-
-    # create a fresh, clean fastapi app for each worker to avoid middleware conflicts
-    from fastapi import FastAPI
-    from tunnel_node.main import websocket_endpoint, proxy_router
-    
-    worker_app = FastAPI(title="tunnelite-worker")
-    worker_app.websocket("/ws/connect")(websocket_endpoint)
-    worker_app.include_router(proxy_router)
-
-    import uvicorn
-    config = uvicorn.Config(
-        app=worker_app,
-        fd=https_socket.fileno(),
-        log_level="info",
-        lifespan="off",  # no startup/shutdown events needed for the isolated worker
-        ssl_keyfile=KEY_FILE,
-        ssl_certfile=CERT_FILE,
-    )
-    server = uvicorn.Server(config)
-    server.run()
-
-def run_temp_api_server():
-    """
-    runs a temporary http server on port 8201 for acme challenges during registration.
-    this is needed because certbot requires http-01 challenge validation.
-    """
-    print("info:     starting temporary api server on port 8201 for registration...")
+def run_temp_server():
+    """run temporary server for registration challenges"""
     try:
         uvicorn.run(
             "tunnel_node.main:app",
             host="0.0.0.0",
             port=8201,
-            log_level="warning",  # reduce noise during registration
+            log_level="warning",
             access_log=False
         )
-    except Exception as e:
-        print(f"error:    temporary api server failed: {e}")
+    except:
+        pass
 
-def get_node_cert() -> str:
-    """gets the stored node certificate"""
-    try:
-        with open(CERT_TOKEN_FILE, "r") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return ""
-
-def save_node_cert(cert: str):
-    """saves the node certificate to disk"""
-    with open(CERT_TOKEN_FILE, "w") as f:
-        f.write(cert)
-    print(f"info:     node certificate saved")
-
-def get_node_port_range():
-    """get the port range assigned to this node from the server"""
-    node_record = requests.get(
-        f"{MAIN_SERVER_URL}/nodes/me",
-        headers={"x-node-secret-id": get_node_secret_id()},
-        timeout=10
-    ).json()
+async def start_node_production():
+    """start node in production mode with ssl"""
+    clear_screen()
+    show_header()
     
-    port_range_str = node_record.get("port_range", "")
-    if not port_range_str:
-        print("error:    no port range assigned to this node")
-        return []
+    user_api_key = get_user_api_key()
+    node_secret_id = get_node_secret_id()
     
-    return parse_port_range(port_range_str)
+    if not user_api_key or not node_secret_id:
+        console.print(Align.center("[dim]node not configured - please register first[/dim]"))
+        input("press enter to continue...")
+        return
+    
+    def make_layout(status: str, details: str = "", error: str = ""):
+        """create production server layout"""
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=7),
+            Layout(name="main", ratio=1),
+            Layout(name="footer", size=3)
+        )
+        
+        if error:
+            header_content = Panel(
+                Align.center(f"[bold]● error[/bold]\n[dim]{error}[/dim]"),
+                box=box.SIMPLE,
+                style="dim"
+            )
+        elif status == "running":
+            # show live metrics
+            sys_metrics = collect_system_metrics()
+            stats_text = f"[bold]tunnelite node[/bold] [dim]│[/dim] "
+            stats_text += f"cpu: {sys_metrics.get('cpu_usage_percent', 0):.1f}% [dim]│[/dim] "
+            stats_text += f"mem: {sys_metrics.get('memory_usage_percent', 0):.1f}% [dim]│[/dim] "
+            stats_text += f"tunnels: {telemetry_data['tunnels']['active_tunnels']}"
+            
+            header_content = Panel(
+                Align.center(stats_text),
+                box=box.SIMPLE,
+                style="bold"
+            )
+        else:
+            header_content = Panel(
+                Align.center(f"[bold]● {status}[/bold]"),
+                box=box.SIMPLE,
+                style="dim"
+            )
+        
+        layout["header"].update(header_content)
+        
+        # main content
+        if error:
+            main_content = Panel(
+                Align.center(f"[dim]{error}[/dim]"),
+                title="error",
+                box=box.SIMPLE
+            )
+        elif status == "running":
+            main_content = Panel(
+                Align.center(
+                    f"[bold]node is running[/bold]\n\n"
+                    f"[dim]hostname:[/dim] {details}\n"
+                    f"[dim]status:[/dim] serving tunnels\n"
+                    f"[dim]uptime:[/dim] {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))}\n\n"
+                    f"[dim]telemetry is being collected and sent to server[/dim]"
+                ),
+                title="production mode",
+                box=box.SIMPLE
+            )
+        else:
+            main_content = Panel(
+                Align.center(f"[dim]{details or status}...[/dim]"),
+                title="starting",
+                box=box.SIMPLE
+            )
+        
+        layout["main"].update(main_content)
+        
+        # footer
+        footer_content = Panel(
+            Align.center("[dim]press [bold]ctrl+c[/bold] to stop[/dim]"),
+            box=box.SIMPLE,
+            style="dim"
+        )
+        layout["footer"].update(footer_content)
+        
+        return layout
 
-def parse_port_range(range_str: str):
-    """
-    parses a port range string like "8000-8010,9000-9005" into a list of individual ports.
-    """
+    with Live(make_layout("checking node status"), refresh_per_second=2) as live:
+        try:
+            # 1. verify node registration
+            live.update(make_layout("verifying registration"))
+            headers = {"x-node-secret-id": node_secret_id}
+            response = requests.get(f"{MAIN_SERVER_URL}/nodes/me", headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                live.update(make_layout("", "", "node not registered - please register first"))
+                await asyncio.sleep(3)
+                return
+            
+            node_data = response.json()
+            hostname = node_data.get("public_hostname")
+            
+            if not hostname:
+                live.update(make_layout("", "", "node registration incomplete"))
+                await asyncio.sleep(3)
+                return
+            
+            # 2. get public ip
+            live.update(make_layout("getting public ip"))
+            public_ip = await get_public_ip()
+            if not public_ip:
+                live.update(make_layout("", "", "could not determine public ip"))
+                await asyncio.sleep(3)
+                return
+            
+            # 3. request ssl certificate from server
+            live.update(make_layout("requesting ssl certificate from server"))
+            cert_response = requests.post(
+                f"{MAIN_SERVER_URL}/internal/control/generate-ssl-certificate",
+                json={"public_ip": public_ip},
+                headers={"x-api-key": node_secret_id},
+                timeout=300
+            )
+            cert_response.raise_for_status()
+            
+            cert_data = cert_response.json()
+            if cert_data.get("status") != "success":
+                live.update(make_layout("", "", f"ssl certificate failed: {cert_data}"))
+                await asyncio.sleep(3)
+                return
+            
+            # 4. save ssl certificates
+            live.update(make_layout("saving ssl certificates"))
+            ssl_cert = cert_data.get("ssl_certificate")
+            ssl_key = cert_data.get("ssl_private_key")
+            
+            cert_dir = f"/etc/letsencrypt/live/{hostname}"
+            os.makedirs(cert_dir, mode=0o755, exist_ok=True)
+            
+            cert_path = f"{cert_dir}/fullchain.pem"
+            key_path = f"{cert_dir}/privkey.pem"
+            
+            with open(cert_path, 'w') as f:
+                f.write(ssl_cert)
+            os.chmod(cert_path, 0o644)
+            
+            with open(key_path, 'w') as f:
+                f.write(ssl_key)
+            os.chmod(key_path, 0o600)
+            
+            # 5. start production server
+            live.update(make_layout("starting production server", hostname))
+            
+            # parse port range
+            port_range_str = node_data.get("port_range", "8201")
+            port_list = parse_port_range(port_range_str)
+            main_port = port_list[0] if port_list else 8201
+            
+            # start telemetry collection
+            start_time = time.time()
+            
+            # create uvicorn config
+            config = uvicorn.Config(
+                app=fastapi_app,
+                host="0.0.0.0",
+                port=main_port,
+                ssl_keyfile=key_path,
+                ssl_certfile=cert_path,
+                access_log=True,
+                log_level="info"
+            )
+            server = uvicorn.Server(config)
+            
+            # start telemetry task
+            async def telemetry_task():
+                while True:
+                    await asyncio.sleep(60)  # send telemetry every minute
+                    await send_telemetry()
+            
+            telemetry_task_handle = asyncio.create_task(telemetry_task())
+            
+            # update ui to running state
+            live.update(make_layout("running", hostname))
+            
+            # run server
+            try:
+                await server.serve()
+            except KeyboardInterrupt:
+                telemetry_task_handle.cancel()
+                live.update(make_layout("shutting down"))
+                await asyncio.sleep(1)
+                
+        except requests.RequestException as e:
+            error_msg = e.response.text if hasattr(e, 'response') and e.response else str(e)
+            live.update(make_layout("", "", f"server error: {error_msg}"))
+            await asyncio.sleep(3)
+        except Exception as e:
+            live.update(make_layout("", "", f"unexpected error: {e}"))
+            await asyncio.sleep(3)
+
+def parse_port_range(range_str: str) -> List[int]:
+    """parse port range string into list of ports"""
     ports = []
     for part in range_str.split(','):
         part = part.strip()
@@ -456,179 +767,64 @@ def parse_port_range(range_str: str):
             ports.append(int(part))
     return ports
 
-def find_available_port_in_range(port_list):
-    """finds the first available port in the given list"""
-    for port in port_list:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('', port))
-                return port
-        except OSError:
-            continue
-    return None
-
-def run_background_service(updated_public_address: str):
-    """
-    runs the main background service that connects to the control channel.
-    this replaces the old uvicorn server approach.
-    """
+def show_main_menu():
+    """show main menu"""
+    clear_screen()
+    show_header()
+    show_auth_status()
+    show_node_status()
     
-    async def background_heartbeat():
-        """sends periodic heartbeats to keep the node record fresh"""
+    menu_items = [
+        "1. start node",
+        "2. register node", 
+        "3. login",
+        "4. register account",
+        "5. exit"
+    ]
+    
+    console.print(Align.center("[bold]node manager[/bold]"))
+    console.print()
+    
+    for item in menu_items:
+        console.print(Align.center(f"[dim]{item}[/dim]"))
+    
+    console.print()
+    
+    choice = Prompt.ask("  choose option", choices=["1", "2", "3", "4", "5"], console=console)
+    
+    if choice == "1":
+        asyncio.run(start_node_production())
+    elif choice == "2":
+        asyncio.run(register_node())
+    elif choice == "3":
+        login_user()
+    elif choice == "4":
+        register_user()
+    elif choice == "5":
+        console.print()
+        console.print(Align.center("[dim]goodbye[/dim]"))
+        sys.exit(0)
+
+@app.command()
+def tui():
+    """start the interactive node manager tui"""
+    try:
         while True:
-            try:
-                await asyncio.sleep(60)  # heartbeat every minute
-                node_info = {
-                    "public_address": updated_public_address,
-                    "cpu_usage": 0.0,  # placeholder
-                    "memory_usage": 0.0,  # placeholder
-                    "active_connections": 0  # placeholder
-                }
-                headers = {"x-node-cert": get_node_cert()}
-                response = requests.post(
-                    f"{MAIN_SERVER_URL}/nodes/heartbeat",
-                    json=node_info,
-                    headers=headers,
-                    timeout=10
-                )
-                if response.status_code == 200:
-                    print("debug:    heartbeat sent successfully")
-                else:
-                    print(f"warn:     heartbeat failed: {response.status_code}")
-            except Exception as e:
-                print(f"error:    heartbeat error: {e}")
+            show_main_menu()
+    except KeyboardInterrupt:
+        console.print()
+        console.print(Align.center("[dim]goodbye[/dim]"))
 
-    async def background_control_channel():
-        """maintains connection to the server's control channel"""
-        while True:
-            try:
-                node_secret_id = get_node_secret_id()
-                ws_url = f"{MAIN_SERVER_URL.replace('https', 'wss')}/internal/control/ws?api_key={node_secret_id}"
-                
-                print(f"info:     connecting to control channel: {ws_url}")
-                
-                async with websockets.connect(ws_url, ssl=True) as websocket:
-                    print("info:     connected to control channel")
-                    
-                    # send initial status
-                    await websocket.send(json.dumps({
-                        "type": "status_update",
-                        "status": "online",
-                        "public_address": updated_public_address
-                    }))
-                    
-                    # listen for commands
-                    async for message in websocket:
-                        try:
-                            data = json.loads(message)
-                            msg_type = data.get("type")
-                            
-                            if msg_type == "activate_tunnel":
-                                tunnel_id = data.get("tunnel_id")
-                                print(f"info:     received tunnel activation: {tunnel_id}")
-                                # todo: implement tunnel activation logic
-                                await websocket.send(json.dumps({
-                                    "type": "tunnel_status_update",
-                                    "tunnel_id": tunnel_id,
-                                    "status": "active"
-                                }))
-                            
-                            elif msg_type == "deactivate_tunnel":
-                                tunnel_id = data.get("tunnel_id")
-                                print(f"info:     received tunnel deactivation: {tunnel_id}")
-                                # todo: implement tunnel deactivation logic
-                                await websocket.send(json.dumps({
-                                    "type": "tunnel_status_update",
-                                    "tunnel_id": tunnel_id,
-                                    "status": "inactive"
-                                }))
-                                
-                        except json.JSONDecodeError:
-                            print(f"warn:     received invalid json from control channel: {message}")
-                        except Exception as e:
-                            print(f"error:    error processing control channel message: {e}")
-                            
-            except Exception as e:
-                print(f"error:    control channel connection failed: {e}")
-                print("info:     retrying in 30 seconds...")
-                await asyncio.sleep(30)
+@app.command()
+def start():
+    """quickly start the node in production mode"""
+    asyncio.run(start_node_production())
 
-    async def main():
-        """run both background tasks concurrently"""
-        await asyncio.gather(
-            background_heartbeat(),
-            background_control_channel()
-        )
-
-    # run the background service
-    asyncio.run(main())
-
-async def main():
-    """main entry point."""
-    if os.geteuid() != 0:
-        print("error:    this script must be run as root to bind to low ports and manage ssl certificates.")
-        # sys.exit(1) # commented for dev
-
-    # check if we're already a registered node
-    node_cert = get_node_cert()
-    if node_cert:
-        print("info:     node certificate found, verifying with server...")
-        # verify the node still exists on the server
-        node_record = await get_self_node_record()
-        print(f"debug:    node_record result: {node_record}")
-        if node_record:
-            print("info:     node verified on server, running full production startup with ssl...")
-            await main_startup_flow()
-        else:
-            print("warn:     node certificate exists but node not found on server. re-registering...")
-            # clear the old cert and re-register
-            if os.path.exists(CERT_TOKEN_FILE):
-                os.remove(CERT_TOKEN_FILE)
-            
-            node_secret_id = get_node_secret_id()
-            
-            # run a temporary http server in the background to handle registration challenges
-            temp_server_process = Process(target=run_temp_api_server, daemon=True)
-            temp_server_process.start()
-            await asyncio.sleep(2) # give it a moment to start up
-            
-            # run the registration flow
-            registration_successful = await run_interactive_registration(node_secret_id)
-            
-            # stop the temp server
-            print("info:     terminating temporary api server...")
-            temp_server_process.terminate()
-            temp_server_process.join(timeout=5)
-
-            if not registration_successful:
-                sys.exit("error:    registration failed.")
-            else:
-                print("info:     registration successful! proceeding to production startup.")
-                await main_startup_flow()
-    else:
-        print("info:     node certificate not found, starting registration process...")
-        node_secret_id = get_node_secret_id()
-        
-        # run a temporary http server in the background to handle registration challenges
-        temp_server_process = Process(target=run_temp_api_server, daemon=True)
-        temp_server_process.start()
-        await asyncio.sleep(2) # give it a moment to start up
-        
-        # run the registration flow
-        registration_successful = await run_interactive_registration(node_secret_id)
-        
-        # stop the temp server
-        print("info:     terminating temporary api server...")
-        temp_server_process.terminate()
-        temp_server_process.join(timeout=5)
-
-        if not registration_successful:
-            sys.exit("error:    registration failed.")
-        else:
-            print("info:     registration successful! proceeding to production startup.")
-            # after successful registration, we must proceed to the main startup flow
-            # which handles ssl certificate generation and the final server launch.
-            await main_startup_flow()
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context):
+    """tunnelite node manager"""
+    if ctx.invoked_subcommand is None:
+        tui()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app() 

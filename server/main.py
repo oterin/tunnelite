@@ -19,6 +19,7 @@ from server.components import (
     internal,
     registration,
     node_control,
+    telemetry,
 )
 from server import garbage_collector
 from server import config
@@ -65,6 +66,7 @@ app.include_router(admin.router)
 app.include_router(internal.router)
 app.include_router(registration.router)
 app.include_router(node_control.router)
+app.include_router(telemetry.router)
 
 # --- startup events ---
 

@@ -21,16 +21,30 @@ class NodeInfoPublic(BaseModel):
     location: str
     public_address: str
 
-@router.get("/me", response_model=Node)
+@router.get("/me")
 async def get_node_me(x_node_secret_id: str = Header(...)):
-    """allows a node to get its own full registration record."""
+    """allows a node to get its own registration record (without sensitive data)."""
     node = database.get_node_by_secret_id(x_node_secret_id)
     if not node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="node not found."
         )
-    return node
+    
+    # return only non-sensitive data
+    safe_node_data = {
+        "public_hostname": node.get("public_hostname"),
+        "status": node.get("status"),
+        "public_address": node.get("public_address"),
+        "port_range": node.get("port_range"),
+        "max_clients": node.get("max_clients"),
+        "bandwidth_down_mbps": node.get("bandwidth_down_mbps"),
+        "bandwidth_up_mbps": node.get("bandwidth_up_mbps"),
+        "verified_geolocation": node.get("verified_geolocation"),
+        "last_seen_at": node.get("last_seen_at")
+    }
+    
+    return safe_node_data
 
 @router.post("/register")
 async def register_node(node_info: NodeInfo, request: Request):

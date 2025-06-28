@@ -71,18 +71,22 @@ async def register_node_websocket(websocket: WebSocket):
         await websocket.accept()
         log.info("registration websocket accepted, waiting for data")
         
-        # 1. initial handshake and admin authentication
+        # 1. initial handshake and user authentication
         data = await websocket.receive_json()
-        log.info("registration websocket received data", extra={"data": data})
+        log.info("registration websocket received data")
         
         node_secret_id = data.get("node_secret_id")
-        admin_key = data.get("admin_key")
+        user_api_key = data.get("user_api_key")
         
-        log.info("checking admin key", extra={"received_key": admin_key, "expected_key": ADMIN_API_KEY})
-
-        if admin_key != ADMIN_API_KEY:
-            log.error("admin key mismatch!", extra={"received": admin_key, "expected": ADMIN_API_KEY})
-            raise WebSocketDisconnect(code=1008, reason="invalid admin key.")
+        if not user_api_key:
+            log.error("no user api key provided")
+            raise WebSocketDisconnect(code=1008, reason="user_api_key is required for node registration.")
+        
+        # authenticate the user
+        user = database.find_user_by_api_key(user_api_key)
+        if not user:
+            log.error("invalid user api key")
+            raise WebSocketDisconnect(code=1008, reason="invalid user credentials.")
 
         if not node_secret_id:
             log.error("no node_secret_id provided")
@@ -202,6 +206,7 @@ async def register_node_websocket(websocket: WebSocket):
 
         final_node_data = {
             "node_secret_id": node_secret_id,
+            "owner_username": user["username"],  # link node to user
             "public_hostname": public_hostname, # the official, server-assigned name
             "status": "approved",
             "node_cert": node_cert,
@@ -209,17 +214,18 @@ async def register_node_websocket(websocket: WebSocket):
             "port_range": port_range_str,
             "bandwidth_down_mbps": round(down_mbps, 2),
             "bandwidth_up_mbps": round(up_mbps, 2),
-            "last_seen_at": time.time()
+            "last_seen_at": time.time(),
+            "created_at": time.time()
         }
         database.upsert_node(final_node_data)
         log.info(
             "Node registration successful",
             extra={"node_secret_id": node_secret_id, "public_hostname": public_hostname}
         )
+        # save the node cert securely in the database, don't send it back
         await websocket.send_json({
             "type": "success", 
-            "message": f"node verified and approved! your public hostname is: {public_hostname}",
-            "node_cert": node_cert
+            "message": f"node verified and approved! your public hostname is: {public_hostname}"
         })
 
     except WebSocketDisconnect as e:
