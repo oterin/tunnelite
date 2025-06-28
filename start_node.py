@@ -215,7 +215,7 @@ async def run_interactive_registration(node_secret_id: str):
                         
                         if response.status_code == 200:
                             print(f"[client] challenge listener set up on port {port}.")
-                            await websocket.send(json.dumps({"type": "ready_for_challenge"}))
+                        await websocket.send(json.dumps({"type": "ready_for_challenge"}))
                         else:
                             print(f"[client] error: challenge setup failed with status {response.status_code}: {response.text}")
                             return False

@@ -473,7 +473,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                 add_network_event("tunnel", "tunnel activated successfully")
                 live.update(make_layout("active", public_url))
                 start_time = time.time()
-                
+
                 # proxy loop with live updates and request logging
                 if tunnel_type in ["http", "https"]:
                     while True:

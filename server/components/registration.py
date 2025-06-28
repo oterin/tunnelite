@@ -39,7 +39,7 @@ def parse_port_range(range_str: str) -> List[int]:
             ports.update(range(int(start), int(end) + 1))
         else:
             ports.add(int(part))
-    return sorted(list(ports))
+            return sorted(list(ports))
 
 
 # --- reverse benchmark endpoints ---
@@ -132,15 +132,15 @@ async def register_node_websocket(websocket: WebSocket):
             
             # first, tell the node to set up all challenge listeners
             challenge_keys = {}
-            for port in ports_to_verify:
-                challenge_key = secrets.token_hex(8)
+        for port in ports_to_verify:
+            challenge_key = secrets.token_hex(8)
                 challenge_keys[port] = challenge_key
-                await websocket.send_json({
-                    "type": "challenge",
+            await websocket.send_json({
+                "type": "challenge",
                     "message": f"setting up listener on port {port}...",
-                    "port": port,
-                    "key": challenge_key
-                })
+                "port": port,
+                "key": challenge_key
+            })
                 await websocket.receive_json()  # wait for client readiness
 
             # give all listeners time to start
@@ -149,19 +149,19 @@ async def register_node_websocket(websocket: WebSocket):
             
             # now verify all ports concurrently with retries
             async def verify_port_with_retries(port: int, key: str) -> bool:
-                verification_url = f"http://{node_ip}:{port}"
+            verification_url = f"http://{node_ip}:{port}"
                 for attempt in range(2):  # max 2 tries per port
                     try:
-                        log.info(
-                            "Verifying node port",
+            log.info(
+                "Verifying node port",
                             extra={"node_secret_id": node_secret_id, "url": verification_url, "attempt": attempt + 1}
-                        )
+            )
                         res = requests.get(verification_url, timeout=8)  # longer timeout
                         if res.text == key:
                             return True
                         else:
                             log.warning(f"port {port} returned wrong key: expected {key}, got {res.text}")
-                    except Exception as e:
+            except Exception as e:
                         log.warning(f"port {port} verification attempt {attempt + 1} failed: {e}")
                         if attempt < 1:  # if not the last attempt
                             await asyncio.sleep(2)  # wait before retry

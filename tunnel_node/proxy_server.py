@@ -179,8 +179,8 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
             async def public_to_ws():
                 nonlocal packet_count_in, bytes_in
                 try:
-                    while True:
-                        data = await client_stream.receive(4096)
+                while True:
+                    data = await client_stream.receive(4096)
                         if not data: 
                             break
                         
@@ -209,7 +209,7 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
                 except Exception as e:
                     print(f"debug:    public_to_ws task error: {e}")
                 finally:
-                    tg.cancel_scope.cancel()
+                tg.cancel_scope.cancel()
 
             async def ws_to_public():
                 nonlocal packet_count_out, bytes_out
@@ -240,14 +240,14 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
                             print(f"tcp:      tunnel {tunnel_id[:8]} ← client: packet #{packet_count_out}, {len(response_data)} bytes (total: {bytes_out} bytes)")
                             print(f"debug:    sending {len(response_data)} bytes back to external client")
                             
-                            await client_stream.send(response_data)
+                    await client_stream.send(response_data)
                         except (anyio.BrokenResourceError, anyio.ClosedResourceError):
                             # client disconnected
                             break
                 except Exception as e:
                     print(f"debug:    ws_to_public task error: {e}")
                 finally:
-                    tg.cancel_scope.cancel()
+                tg.cancel_scope.cancel()
 
             tg.start_soon(public_to_ws)
             tg.start_soon(ws_to_public)
@@ -296,7 +296,7 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
         
         # ensure client stream is properly closed
         try:
-            await client_stream.aclose()
+        await client_stream.aclose()
         except:
             pass
 
