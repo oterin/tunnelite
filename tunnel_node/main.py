@@ -397,13 +397,22 @@ async def websocket_endpoint(websocket: WebSocket):
         response = requests.post(activation_url, params=params, headers=headers)
 
         if not response.ok:
-            error_detail = response.json().get("detail", "activation failed")
+            try:
+                error_detail = response.json().get("detail", "activation failed")
+            except (ValueError, AttributeError):
+                error_detail = f"HTTP {response.status_code}: {response.text}"
             print(f"error:    activation failed from main server: {error_detail}")
             await websocket.close(code=1008, reason=error_detail)
             return
 
         # 4. activation successful. use the authoritative data from the server
-        official_tunnel_data = response.json()
+        try:
+            official_tunnel_data = response.json()
+        except ValueError as e:
+            print(f"error:    failed to parse activation response as JSON: {e}")
+            await websocket.close(code=1011, reason="server returned invalid activation response")
+            return
+            
         print(f"info:     activation successful: {official_tunnel_data}")
         public_url = official_tunnel_data.get("public_url")
         tunnel_id = official_tunnel_data.get("tunnel_id")

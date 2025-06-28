@@ -423,22 +423,22 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                 "local_port": local_port,
                 "ping_data": ping_data
             }
-        res = requests.post(f"{main_server_url}/tunnels", headers=headers, json=create_payload)
-        res.raise_for_status()
-        tunnel = res.json()
+            res = requests.post(f"{main_server_url}/tunnels", headers=headers, json=create_payload)
+            res.raise_for_status()
+            tunnel = res.json()
             add_network_event("tunnel", f"tunnel created: {tunnel['public_url']}")
 
-    tunnel_id = tunnel["tunnel_id"]
-    public_url = tunnel["public_url"]
-    public_hostname = tunnel["public_hostname"]
+            tunnel_id = tunnel["tunnel_id"]
+            public_url = tunnel["public_url"]
+            public_hostname = tunnel["public_hostname"]
 
             # 3. get node details for the server-selected node
             live.update(make_layout("connecting", public_url))
-        node_res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
-        node_res.raise_for_status()
-        target_node = next((n for n in node_res.json() if n["public_hostname"] == public_hostname), None)
+            node_res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
+            node_res.raise_for_status()
+            target_node = next((n for n in node_res.json() if n["public_hostname"] == public_hostname), None)
             
-        if not target_node:
+            if not target_node:
                 live.update(make_layout("", "", f"could not find assigned node '{public_hostname}'"))
                 await asyncio.sleep(3)
                 return
@@ -448,31 +448,31 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
             port_for_ws = urlparse(target_node["public_address"]).port
             
             node_ws_url = f"wss://{hostname_for_ws}:{port_for_ws}"
-    connect_uri = f"{node_ws_url}/ws/connect"
+            connect_uri = f"{node_ws_url}/ws/connect"
 
             # 4. connect and run tunnel
             add_network_event("connection", f"connecting to {hostname_for_ws}")
-        async with websockets.connect(connect_uri) as websocket:
+            async with websockets.connect(connect_uri) as websocket:
                 add_network_event("connection", "websocket connected")
-            await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
+                await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
 
-            activation_response_str = await websocket.recv()
-            activation_response = json.loads(activation_response_str)
-            if activation_response.get("status") != "success":
+                activation_response_str = await websocket.recv()
+                activation_response = json.loads(activation_response_str)
+                if activation_response.get("status") != "success":
                     add_network_event("error", f"activation failed: {activation_response}")
                     live.update(make_layout("", "", f"activation failed: {activation_response}"))
                     await asyncio.sleep(3)
-                return
+                    return
 
                 add_network_event("tunnel", "tunnel activated successfully")
                 live.update(make_layout("active", public_url))
                 start_time = time.time()
                 
                 # proxy loop with live updates and request logging
-            if tunnel_type in ["http", "https"]:
-                while True:
-                    request_from_node = await websocket.recv()
-                    request_data_bytes = request_from_node if isinstance(request_from_node, bytes) else request_from_node.encode('utf-8')
+                if tunnel_type in ["http", "https"]:
+                    while True:
+                        request_from_node = await websocket.recv()
+                        request_data_bytes = request_from_node if isinstance(request_from_node, bytes) else request_from_node.encode('utf-8')
                         
                         # parse request for logging
                         try:
@@ -486,7 +486,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                         # log incoming request
                         add_network_event("request", f"{method} {path}", {"method": method, "path": path})
                         
-                    response_to_node = await handle_http_request(local_port, request_data_bytes)
+                        response_to_node = await handle_http_request(local_port, request_data_bytes)
                         
                         # parse response status for logging
                         try:
@@ -499,7 +499,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                         # log outgoing response
                         add_network_event("response", f"HTTP {status_code}", {"status_code": status_code})
                         
-                    await websocket.send(response_to_node)
+                        await websocket.send(response_to_node)
                         
                         # update stats and log
                         request_count += 1
@@ -509,7 +509,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                         log_request(method, path, status_code, len(response_to_node), "out")
                         live.update(make_layout("active", public_url))
                         
-            elif tunnel_type in ["tcp", "udp"]:
+                elif tunnel_type in ["tcp", "udp"]:
                     add_network_event("tunnel", f"starting {tunnel_type} tunnel on port {local_port}")
                     print(f"debug:    starting tcp tunnel, forwarding {public_url} -> localhost:{local_port}")
                     
@@ -607,11 +607,11 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
             add_network_event("error", f"api error: {error_msg}")
             live.update(make_layout("", "", f"api error: {error_msg}"))
             await asyncio.sleep(3)
-    except (ConnectionRefusedError, websockets.exceptions.InvalidURI):
+        except (ConnectionRefusedError, websockets.exceptions.InvalidURI):
             add_network_event("error", f"could not connect to node at {connect_uri}")
             live.update(make_layout("", "", f"could not connect to node at {connect_uri}"))
             await asyncio.sleep(3)
-    except websockets.exceptions.ConnectionClosed as e:
+        except websockets.exceptions.ConnectionClosed as e:
             add_network_event("connection", f"connection closed: {e.reason} (code: {e.code})")
             live.update(make_layout("", "", f"connection closed: {e.reason} (code: {e.code})"))
             await asyncio.sleep(3)

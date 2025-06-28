@@ -159,4 +159,16 @@ async def verify_tunnel_activation(
         )
 
     # 4. if all checks pass, return the tunnel details to the node
-    return tunnel
+    response_tunnel = tunnel.copy()
+    
+    # ensure the response includes public_hostname for the response model
+    if "node_public_hostname" in response_tunnel:
+        response_tunnel["public_hostname"] = response_tunnel["node_public_hostname"]
+    elif "public_hostname" not in response_tunnel:
+        # fallback: get hostname from the node record
+        response_tunnel["public_hostname"] = node.get("public_hostname", "unknown")
+    
+    # remove internal fields that shouldn't be exposed
+    response_tunnel.pop("node_secret_id", None)
+    
+    return response_tunnel
