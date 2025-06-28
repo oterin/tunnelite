@@ -1,5 +1,3 @@
-
-
 import secrets
 from typing import Dict
 
@@ -52,6 +50,25 @@ async def get_current_user(api_key: str = Depends(api_key_header)) -> Dict:
 
     return user
 
+# node api key dependency
+async def get_node_from_api_key(request: Request) -> Dict:
+    """authenticate a node using x-api-key header (node secret id)"""
+    api_key = request.headers.get("x-api-key")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="x-api-key header required",
+        )
+
+    node = database.get_node_by_secret_id(api_key)
+    if not node:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid node credentials",
+        )
+
+    return node
+
 # api endpoints
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/hour")
@@ -98,6 +115,5 @@ async def refresh_api_key(request: Request, current_user: Dict = Depends(get_cur
     return Token(api_key=new_api_key)
 
 @router.get("/users/me", response_model=User)
-
 async def read_users_me(current_user: dict = Depends(get_current_user)):
     return current_user
