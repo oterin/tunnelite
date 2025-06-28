@@ -18,7 +18,7 @@ except Exception as e:
     CLOUDFLARE_ZONE_ID = None
     BASE_DOMAIN = "tunnelite.ws"
 
-API_BASE_URL = "https://api.cloudflare.com/v4"
+API_BASE_URL = "https://api.cloudflare.com/client/v4"
 
 def get_zone_id_for_domain(domain: str) -> str:
     """
