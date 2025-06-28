@@ -74,30 +74,34 @@ async def wait_for_dns_propagation(hostname: str, expected_ip: str):
     Periodically checks DNS until the new IP address has propagated.
     This is crucial before attempting to get an SSL certificate.
     """
+    import socket as socket_module  # explicit import to avoid conflicts
+    
     print(f"info:     Waiting for DNS propagation for {hostname} to point to {expected_ip}...")
     # Wait up to 300 seconds (30 tries * 10s sleep) - DNS can take a while
     for i in range(30):
         try:
             # Note: This checks the DNS resolution from where the node is running.
             # This is a good indicator but not a guarantee of global propagation.
-            resolved_ip = socket.gethostbyname(hostname)
+            resolved_ip = socket_module.gethostbyname(hostname)
             if resolved_ip == expected_ip:
                 print("info:     DNS propagation successful!")
                 # Do one more check after a short delay to be sure
                 await asyncio.sleep(5)
                 try:
-                    double_check_ip = socket.gethostbyname(hostname)
+                    double_check_ip = socket_module.gethostbyname(hostname)
                     if double_check_ip == expected_ip:
                         print("info:     DNS propagation confirmed with double-check!")
                         return True
                     else:
                         print(f"warn:     DNS double-check failed, resolved to {double_check_ip}, continuing to wait...")
-                except socket.gaierror:
+                except socket_module.gaierror:
                     print("warn:     DNS double-check failed with lookup error, continuing to wait...")
             else:
                 print(f"debug:    DNS resolved to {resolved_ip}, expected {expected_ip}, waiting... (attempt {i+1}/30)")
-        except socket.gaierror as e:
+        except socket_module.gaierror as e:
             print(f"debug:    DNS record not found yet, waiting... (attempt {i+1}/30) - {e}")
+        except Exception as e:
+            print(f"debug:    DNS lookup failed with unexpected error: {e}, waiting... (attempt {i+1}/30)")
         
         await asyncio.sleep(10)
         
