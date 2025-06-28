@@ -55,9 +55,9 @@ async def get_public_ip():
 async def update_dns_record(ip: str):
     """Calls the main server's DDNS endpoint to update this node's A record."""
     print("info:     Notifying main server to update DNS record...")
-    headers = {"x-api-key": config.get("NODE_SECRET_ID")}
+    headers = {"x-api-key": common_config.get("NODE_SECRET_ID")}
     payload = {"ip_address": ip}
-    url = f"{config.get('MAIN_SERVER_URL')}/internal/control/ddns-update"
+    url = f"{common_config.get('MAIN_SERVER_URL')}/internal/control/ddns-update"
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         response.raise_for_status()
@@ -131,8 +131,8 @@ def run_certbot(hostname: str, email: str):
 async def get_self_node_record():
     """Fetches the full details for this node from the main server."""
     print("info:     Fetching node record from main server...")
-    headers = {"x-api-key": config.get("NODE_SECRET_ID")}
-    url = f"{config.get('MAIN_SERVER_URL')}/nodes/me"
+    headers = {"x-api-key": common_config.get("NODE_SECRET_ID")}
+    url = f"{common_config.get('MAIN_SERVER_URL')}/nodes/me"
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -152,7 +152,7 @@ async def main_startup_flow():
 
     hostname = node_record.get("public_hostname")
     # Assuming the server provides the owner's email for Certbot registration
-    admin_email = node_record.get("owner_email", "admin@" + config.get("TUNNELITE_DOMAIN", "tunnelite.ws"))
+    admin_email = node_record.get("owner_email", "admin@" + common_config.get("TUNNELITE_DOMAIN", "tunnelite.ws"))
     port_range = node_record.get("port_range", [])
     
     if not all([hostname, port_range]):
@@ -202,7 +202,7 @@ async def main_startup_flow():
         ssl_keyfile=key_path,
         ssl_certfile=cert_path,
         # Use a reasonable number of worker processes
-        workers=config.get("UVICORN_WORKERS", 2), 
+        workers=common_config.get("UVICORN_WORKERS", 2), 
     )
 
 # --- phase 1: interactive registration logic ---
@@ -627,7 +627,7 @@ if __name__ == "__main__":
     # global config setup - no initialization needed
 
     # set user/group for privilege drop if specified
-    DROP_TO_USER = config.get("DROP_TO_USER")
-    DROP_TO_GROUP = config.get("DROP_TO_GROUP")
+    DROP_TO_USER = common_config.get("DROP_TO_USER")
+    DROP_TO_GROUP = common_config.get("DROP_TO_GROUP")
 
     asyncio.run(main())
