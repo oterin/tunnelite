@@ -502,9 +502,8 @@ def run_background_service(updated_public_address: str):
     1. a periodic heartbeat to the main server.
     2. a persistent websocket control channel connection.
     """
-    # this function will run in its own process, so it needs to initialize its own config
+    # this function will run in its own process, so it needs to import its own config
     from tunnel_node import config as t_config
-    t_config.initialize_from_json()
 
     # also needs to init its own copy of the node cert
     node_cert = get_node_cert()
@@ -625,8 +624,7 @@ if __name__ == "__main__":
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
-    # global config setup
-    config.initialize_from_json()
+    # global config setup - no initialization needed
 
     # set user/group for privilege drop if specified
     DROP_TO_USER = config.get("DROP_TO_USER")
