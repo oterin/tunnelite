@@ -293,8 +293,9 @@ async def start_tcp_listener(tunnel_id: str, port: int):
         sock.bind(('0.0.0.0', port))
         sock.listen()
         
-        # create anyio listener from the configured socket
-        listener = anyio.create_tcp_listener(sock=sock)
+        # wrap the socket with anyio and create listener
+        async_sock = anyio.wrap_socket(sock)
+        listener = anyio.create_tcp_listener(sock=async_sock)
         print(f"info:     tcp listener started for tunnel {tunnel_id} on port {port}")
         handler = lambda client: tcp_proxy_handler(client, tunnel_id)
         await listener.serve(handler)
