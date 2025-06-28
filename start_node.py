@@ -13,7 +13,6 @@ from urllib.parse import urlparse, urlunparse
 import requests
 import uvicorn
 import websockets
-import subprocess
 from tunnel_node import config
 
 # these imports are now relative to the project root
@@ -40,172 +39,94 @@ DROP_TO_USER = None  # optional privilege dropping
 DROP_TO_GROUP = None  # optional privilege dropping
 
 async def get_public_ip():
-    """Uses a third-party service to determine the node's public IP address."""
+    """uses a third-party service to determine the node's public ip address."""
     try:
-        print("info:     Fetching public IP address...")
+        print("info:     fetching public ip address...")
         response = requests.get("https://api.ipify.org?format=json", timeout=10)
         response.raise_for_status()
         ip = response.json()["ip"]
-        print(f"info:     Public IP address is {ip}")
+        print(f"info:     public ip address is {ip}")
         return ip
     except requests.RequestException as e:
-        print(f"error:    Could not fetch public IP: {e}")
+        print(f"error:    could not fetch public ip: {e}")
         return None
 
-async def update_dns_record(ip: str):
-    """Calls the main server's DDNS endpoint to update this node's A record."""
-    print("info:     Notifying main server to update DNS record...")
-    headers = {"x-api-key": get_node_secret_id()}
-    payload = {"ip_address": ip}
-    url = f"{MAIN_SERVER_URL}/internal/control/ddns-update"
+async def request_ssl_certificate_from_server(public_ip: str):
+    """
+    request ssl certificate generation from the server.
+    the server handles all dns challenges and cloudflare api calls.
+    """
+    print("info:     requesting ssl certificate generation from server...")
+    
+    node_secret_id = get_node_secret_id()
+    headers = {"x-node-secret-id": node_secret_id}
+    payload = {"public_ip": public_ip}
+    
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(
+            f"{MAIN_SERVER_URL}/internal/control/generate-ssl-certificate",
+            json=payload,
+            headers=headers,
+            timeout=300,  # 5 minutes timeout for certificate generation
+            verify=True
+        )
         response.raise_for_status()
-        print(f"info:     Successfully notified server of new IP: {ip}")
-        return True
-    except requests.RequestException as e:
-        print(f"error:    Failed to update DNS record via server: {e}")
-        if e.response:
-            print(f"error details: {e.response.text}")
-        return False
-
-async def wait_for_dns_propagation(hostname: str, expected_ip: str):
-    """
-    Periodically checks DNS until the new IP address has propagated.
-    This is crucial before attempting to get an SSL certificate.
-    """
-    import socket as socket_module  # explicit import to avoid conflicts
-    
-    print(f"info:     Waiting for DNS propagation for {hostname} to point to {expected_ip}...")
-    # Wait up to 300 seconds (30 tries * 10s sleep) - DNS can take a while
-    for i in range(30):
-        try:
-            # Note: This checks the DNS resolution from where the node is running.
-            # This is a good indicator but not a guarantee of global propagation.
-            resolved_ip = socket_module.gethostbyname(hostname)
-            if resolved_ip == expected_ip:
-                print("info:     DNS propagation successful!")
-                # Do one more check after a short delay to be sure
-                await asyncio.sleep(5)
-                try:
-                    double_check_ip = socket_module.gethostbyname(hostname)
-                    if double_check_ip == expected_ip:
-                        print("info:     DNS propagation confirmed with double-check!")
-                        return True
-                    else:
-                        print(f"warn:     DNS double-check failed, resolved to {double_check_ip}, continuing to wait...")
-                except socket_module.gaierror:
-                    print("warn:     DNS double-check failed with lookup error, continuing to wait...")
-            else:
-                print(f"debug:    DNS resolved to {resolved_ip}, expected {expected_ip}, waiting... (attempt {i+1}/30)")
-        except socket_module.gaierror as e:
-            print(f"debug:    DNS record not found yet, waiting... (attempt {i+1}/30) - {e}")
-        except Exception as e:
-            print(f"debug:    DNS lookup failed with unexpected error: {e}, waiting... (attempt {i+1}/30)")
         
-        await asyncio.sleep(10)
-        
-    print(f"error:    DNS for {hostname} did not propagate to {expected_ip} in time (waited 5 minutes).")
-    print(f"error:    This may indicate a DNS configuration issue.")
-    return False
-
-def setup_cloudflare_credentials():
-    """
-    Creates a Cloudflare credentials file for certbot to use for DNS challenges.
-    Returns the path to the credentials file.
-    """
-    # load cloudflare credentials from the same file the server uses
-    try:
-        from server.components.dns import CLOUDFLARE_API_TOKEN
-        if not CLOUDFLARE_API_TOKEN:
-            print("error:    Cloudflare API token not found in dns_secrets.json")
+        cert_data = response.json()
+        if cert_data.get("status") != "success":
+            print(f"error:    server ssl certificate generation failed: {cert_data}")
             return None
-    except ImportError:
-        print("error:    Could not import Cloudflare credentials")
-        return None
-    
-    # create credentials file for certbot
-    creds_path = "/tmp/cloudflare-credentials.ini"
-    try:
-        with open(creds_path, "w") as f:
-            f.write(f"dns_cloudflare_api_token = {CLOUDFLARE_API_TOKEN}\n")
         
-        # set restrictive permissions for security
-        os.chmod(creds_path, 0o600)
-        print(f"info:     Created Cloudflare credentials file at {creds_path}")
-        return creds_path
+        # save certificates locally
+        hostname = cert_data.get("hostname")
+        ssl_cert = cert_data.get("ssl_certificate")
+        ssl_key = cert_data.get("ssl_private_key")
+        
+        if not all([hostname, ssl_cert, ssl_key]):
+            print("error:    server response missing required certificate data")
+            return None
+        
+        # create directories if they don't exist
+        cert_dir = f"/etc/letsencrypt/live/{hostname}"
+        os.makedirs(cert_dir, mode=0o755, exist_ok=True)
+        
+        cert_path = f"{cert_dir}/fullchain.pem"
+        key_path = f"{cert_dir}/privkey.pem"
+        
+        # write certificate files with secure permissions
+        with open(cert_path, 'w') as f:
+            f.write(ssl_cert)
+        os.chmod(cert_path, 0o644)
+        
+        with open(key_path, 'w') as f:
+            f.write(ssl_key)
+        os.chmod(key_path, 0o600)  # private key should be read-only by root
+        
+        print(f"info:     ssl certificate saved to {cert_path}")
+        print(f"info:     ssl private key saved to {key_path}")
+        
+        return {
+            "hostname": hostname,
+            "cert_path": cert_path,
+            "key_path": key_path
+        }
+        
+    except requests.RequestException as e:
+        print(f"error:    failed to request ssl certificate from server: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                print(f"error:    server error details: {error_detail}")
+            except:
+                print(f"error:    server response: {e.response.text}")
+        return None
     except Exception as e:
-        print(f"error:    Failed to create Cloudflare credentials file: {e}")
+        print(f"error:    unexpected error during ssl certificate request: {e}")
         return None
-
-def run_certbot(hostname: str, email: str):
-    """
-    Executes Certbot to obtain/renew an SSL certificate using DNS challenge.
-    This works even when port 80 is not accessible.
-    """
-    print("info:     Running Certbot with DNS challenge to obtain SSL certificate...")
-    
-    # setup cloudflare credentials file
-    creds_file = setup_cloudflare_credentials()
-    if not creds_file:
-        print("error:    Cannot proceed without Cloudflare credentials")
-        return False
-    
-    try:
-        # first, check if certbot-dns-cloudflare plugin is installed
-        check_plugin_cmd = ["certbot", "plugins"]
-        result = subprocess.run(check_plugin_cmd, capture_output=True, text=True)
-        if "dns-cloudflare" not in result.stdout:
-            print("error:    certbot-dns-cloudflare plugin not found. Installing...")
-            install_cmd = ["pip", "install", "certbot-dns-cloudflare"]
-            subprocess.run(install_cmd, check=True)
-            print("info:     certbot-dns-cloudflare plugin installed successfully")
-        
-        # use dns challenge with cloudflare
-        command = [
-            "certbot", "certonly",
-            "--dns-cloudflare",
-            "--dns-cloudflare-credentials", creds_file,
-            "--dns-cloudflare-propagation-seconds", "60",  # wait for dns propagation
-            "-d", hostname,
-            "--agree-tos",
-            "-n",  # non-interactive
-            "-m", email,
-            "--no-eff-email",  # don't ask to be on the eff mailing list
-            "--cert-name", hostname,  # ensures we renew the correct cert
-            "--verbose"  # more detailed output for debugging
-        ]
-        
-        print(f"info:     Certbot DNS challenge command: {' '.join(command)}")
-        
-        # using check=True will raise an exception if certbot fails
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        print("info:     Certbot DNS challenge run successful.")
-        if result.stdout:
-            print(f"debug:    Certbot stdout: {result.stdout}")
-        return True
-        
-    except FileNotFoundError:
-        print("error:    'certbot' command not found. Please ensure it is installed and in the system's PATH.")
-        return False
-    except subprocess.CalledProcessError as e:
-        print("error:    Certbot DNS challenge failed.")
-        print(f"Certbot stdout: {e.stdout}")
-        print(f"Certbot stderr: {e.stderr}")
-        print(f"Certbot return code: {e.returncode}")
-        return False
-    finally:
-        # clean up credentials file for security
-        try:
-            if creds_file and os.path.exists(creds_file):
-                os.remove(creds_file)
-                print("info:     Cleaned up temporary credentials file")
-        except Exception as e:
-            print(f"warn:     Could not clean up credentials file: {e}")
 
 async def get_self_node_record():
-    """Fetches the full details for this node from the main server."""
-    print("info:     Fetching node record from main server...")
+    """fetches the full details for this node from the main server."""
+    print("info:     fetching node record from main server...")
     headers = {"x-node-secret-id": get_node_secret_id()}
     url = f"{MAIN_SERVER_URL}/nodes/me"
     try:
@@ -213,82 +134,58 @@ async def get_self_node_record():
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
-        print(f"error:    Could not fetch node record: {e}")
+        print(f"error:    could not fetch node record: {e}")
         if hasattr(e, 'response') and e.response is not None and e.response.status_code == 404:
-            print("warn:     Node not found in server database. Node may need to be re-registered.")
+            print("warn:     node not found in server database. node may need to be re-registered.")
         return None
 
 async def main_startup_flow():
-    """The main orchestration logic for node startup."""
+    """the main orchestration logic for node startup."""
     
-    # 1. Get this node's details from the server
+    # 1. get this node's details from the server
     node_record = await get_self_node_record()
     if not node_record:
-        print("critical: Cannot start without node record. This should not happen after registration.")
+        print("critical: cannot start without node record. this should not happen after registration.")
         return
 
     hostname = node_record.get("public_hostname")
-    # Assuming the server provides the owner's email for Certbot registration
-    admin_email = node_record.get("owner_email", "admin@" + common_config.get("TUNNELITE_DOMAIN", "tunnelite.ws"))
     port_range = node_record.get("port_range", [])
     
     if not all([hostname, port_range]):
-        print("critical: Node record is missing hostname or port_range. Exiting.")
+        print("critical: node record is missing hostname or port_range. exiting.")
         return
         
-    # We will use the first port in the assigned range for the main server
+    # we will use the first port in the assigned range for the main server
     main_server_port = port_range[0]
 
-    # 2. Determine public IP and update DNS via the server (with retries)
+    # 2. determine public ip
     public_ip = await get_public_ip()
     if not public_ip:
-        print("critical: Could not determine public IP. Exiting.")
+        print("critical: could not determine public ip. exiting.")
         return
 
-    print("info:     Attempting to update DNS record (will retry if needed)...")
-    dns_updated = False
-    for attempt in range(5):  # try up to 5 times
-        print(f"info:     DNS update attempt {attempt + 1}/5...")
-        if await update_dns_record(public_ip):
-            dns_updated = True
-            break
-        else:
-            print(f"warn:     DNS update attempt {attempt + 1} failed, waiting 30 seconds before retry...")
-            await asyncio.sleep(30)
+    # 3. request ssl certificate generation from server
+    # the server handles dns updates, dns propagation checking, and ssl certificate generation
+    print("info:     requesting ssl certificate generation from server...")
+    cert_info = await request_ssl_certificate_from_server(public_ip)
     
-    if not dns_updated:
-        print("error:    All DNS update attempts failed, but continuing to check if DNS resolves correctly...")
-    
-    # 3. Wait for the DNS change to propagate (regardless of update API success)
-    print("info:     Checking DNS propagation...")
-    if not await wait_for_dns_propagation(hostname, public_ip):
-        print("critical: DNS propagation failed. Cannot obtain SSL certificate without working DNS.")
-        print("critical: Please check your DNS configuration and try again.")
+    if not cert_info:
+        print("critical: could not obtain ssl certificate from server. cannot start production server.")
         return
 
-    # 4. Now that DNS is working, proceed with SSL certificate using DNS challenge
-    print("info:     DNS propagation confirmed. Proceeding with SSL certificate using DNS challenge...")
+    cert_path = cert_info["cert_path"]
+    key_path = cert_info["key_path"]
 
-    # 5. Run Certbot to get/renew SSL certificates using DNS challenge
-    cert_path = f"/etc/letsencrypt/live/{hostname}/fullchain.pem"
-    key_path = f"/etc/letsencrypt/live/{hostname}/privkey.pem"
-
-    # DNS challenge doesn't require any local server - it uses Cloudflare API directly
-    print("info:     Attempting to obtain SSL certificate using DNS challenge...")
-    if not run_certbot(hostname, admin_email):
-        print("critical: Could not obtain SSL certificate. Cannot start production server.")
-        return
-
-    # 6. Final check for certificate files
+    # 4. final check for certificate files
     if not (os.path.exists(cert_path) and os.path.exists(key_path)):
-        print(f"critical: SSL certificates not found at expected path after Certbot run. Aborting.")
+        print(f"critical: ssl certificates not found at expected paths. aborting.")
         return
 
-    print("info:     SSL certificate obtained successfully!")
-    print("info:     Node setup complete - DNS propagated and SSL certificate ready!")
+    print("info:     ssl certificate obtained successfully from server!")
+    print("info:     node setup complete - ready to start production server!")
 
-    # 7. Start the production Uvicorn server with the new SSL certs
-    print(f"info:     Starting production server for {hostname} on port {main_server_port} with SSL...")
+    # 5. start the production uvicorn server with the ssl certs
+    print(f"info:     starting production server for {hostname} on port {main_server_port} with ssl...")
     
     uvicorn.run(
         "tunnel_node.main:app",
@@ -296,7 +193,7 @@ async def main_startup_flow():
         port=main_server_port,
         ssl_keyfile=key_path,
         ssl_certfile=cert_path,
-        # Use a reasonable number of worker processes
+        # use a reasonable number of worker processes
         workers=common_config.get("UVICORN_WORKERS", 2), 
     )
 
@@ -418,27 +315,15 @@ async def run_interactive_registration(node_secret_id: str):
                     port, key = message.get('port'), message.get('key')
                     if not port or not key: return False
                     try:
-                        # connect to the local temporary api server, not the public address
-                        local_port = int(temp_public_address.split(":")[-1])
-                        local_api_url = f"http://127.0.0.1:{local_port}"
-                        
-                        # send the challenge setup request
-                        response = requests.post(
-                            f"{local_api_url}/internal/setup-challenge-listener",
-                            json={"port": port, "key": key}, 
-                            timeout=10  # longer timeout for setup
-                        )
-                        
-                        if response.status_code == 200:
-                            print(f"[client] challenge listener set up on port {port}.")
-                            await websocket.send(json.dumps({"type": "ready_for_challenge"}))
-                        else:
-                            print(f"[client] error: challenge setup failed with status {response.status_code}: {response.text}")
-                            return False
-                            
-                    except requests.RequestException as e:
-                        print(f"[client] error: could not contact local api for challenge: {e}")
-                        return False
+                        challenge_url = f"http://{public_ip}:{port}/.well-known/acme-challenge/{key}"
+                        # use a direct http request instead of a browser
+                        response = requests.get(challenge_url, timeout=5)
+                        response.raise_for_status()
+                        print(f"info:     challenge endpoint is accessible: {challenge_url}")
+                        await websocket.send(json.dumps({"status": "ready"}))
+                    except Exception as e:
+                        print(f"error:    challenge endpoint not accessible: {e}")
+                        await websocket.send(json.dumps({"status": "failed", "error": str(e)}))
                 elif msg_type == "info":
                     print(f"[server] {message.get('message', '...')}")
                 elif msg_type == "success":
@@ -454,22 +339,27 @@ async def run_interactive_registration(node_secret_id: str):
         print(f"an unexpected error occurred during registration: {e}")
         return False
 
-
-# --- phase 2: production server logic ---
-
 def drop_privileges(uid_name: str, gid_name: str):
-    try:
-        import pwd
-        import grp
-        new_uid = pwd.getpwnam(uid_name).pw_uid
-        new_gid = grp.getgrnam(gid_name).gr_gid
-    except KeyError:
-        sys.exit(f"error: user '{uid_name}' or group '{gid_name}' not found. please create them first.")
+    """drops root privileges to a less privileged user and group."""
+    if uid_name is None or gid_name is None:
+        return
+    
+    import pwd
+    import grp
+    
+    # get the uid/gid from the name
+    running_uid = pwd.getpwnam(uid_name).pw_uid
+    running_gid = grp.getgrnam(gid_name).gr_gid
+
+    # remove group privileges
     os.setgroups([])
-    os.setgid(new_gid)
-    os.setuid(new_uid)
+
+    # try setting the new uid/gid
+    os.setgid(running_gid)
+    os.setuid(running_uid)
+
+    # ensure a very conservative umask
     os.umask(0o077)
-    print(f"info:     (pid: {os.getpid()}) process privileges dropped to {uid_name}:{gid_name}")
 
 def start_worker_process(https_socket: socket.socket):
     print(f"info:     worker process started (pid: {os.getpid()})")
@@ -498,31 +388,22 @@ def start_worker_process(https_socket: socket.socket):
     server = uvicorn.Server(config)
     server.run()
 
-
 def run_temp_api_server():
-    print("info:     starting temporary api server for registration...")
+    """
+    runs a temporary http server on port 8201 for acme challenges during registration.
+    this is needed because certbot requires http-01 challenge validation.
+    """
+    print("info:     starting temporary api server on port 8201 for registration...")
     try:
-        host = "127.0.0.1"
-        port = 8201  # use default port for temp server
-        print(f"info:     temp server will bind to {host}:{port}")
-        
-        # check if port is available
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind((host, port))
-                print(f"info:     port {port} is available for temp server")
-            except OSError as e:
-                print(f"error:    port {port} is not available: {e}")
-                return
-        
-        from tunnel_node.main import app as temp_app
-        print(f"info:     starting uvicorn on {host}:{port}")
-        uvicorn.run(temp_app, host=host, port=port, log_level="info")  # changed to info for better debugging
+        uvicorn.run(
+            "tunnel_node.main:app",
+            host="0.0.0.0",
+            port=8201,
+            log_level="warning",  # reduce noise during registration
+            access_log=False
+        )
     except Exception as e:
-        print(f"error: failed to start temporary server: {e}")
-        import traceback
-        print(f"traceback: {traceback.format_exc()}")
-
+        print(f"error:    temporary api server failed: {e}")
 
 def get_node_cert() -> str:
     """gets the stored node certificate"""
@@ -539,48 +420,36 @@ def save_node_cert(cert: str):
     print(f"info:     node certificate saved")
 
 def get_node_port_range():
-    """gets the node's registered port range from the server"""
-    node_secret_id = get_node_secret_id()
-    try:
-        res = requests.get(
-            f"{MAIN_SERVER_URL}/nodes/me",
-            headers={"x-node-secret-id": node_secret_id},
-            timeout=10, verify=True
-        )
-        if res.status_code == 200:
-            node_data = res.json()
-            print(f"debug:    received node data: {node_data}")
-            port_range_str = node_data.get("port_range", "")
-            print(f"debug:    port_range from server: '{port_range_str}'")
-            parsed_ports = parse_port_range(port_range_str)
-            print(f"debug:    parsed ports: {parsed_ports}")
-            return parsed_ports
-        else:
-            print(f"warn:     could not get port range from server: {res.status_code} - {res.text}")
-            return []
-    except requests.RequestException as e:
-        print(f"warn:     could not contact server for port range: {e}")
-        return []
-
-def parse_port_range(range_str: str):
-    """parse port range string like '8202-8219' into list of ports"""
-    ports = set()
-    if not range_str:
+    """get the port range assigned to this node from the server"""
+    node_record = requests.get(
+        f"{MAIN_SERVER_URL}/nodes/me",
+        headers={"x-node-secret-id": get_node_secret_id()},
+        timeout=10
+    ).json()
+    
+    port_range_str = node_record.get("port_range", "")
+    if not port_range_str:
+        print("error:    no port range assigned to this node")
         return []
     
-    parts = [p.strip() for p in range_str.split(';')]
-    for part in parts:
-        if not part: 
-            continue
+    return parse_port_range(port_range_str)
+
+def parse_port_range(range_str: str):
+    """
+    parses a port range string like "8000-8010,9000-9005" into a list of individual ports.
+    """
+    ports = []
+    for part in range_str.split(','):
+        part = part.strip()
         if '-' in part:
-            start, end = part.split('-')
-            ports.update(range(int(start), int(end) + 1))
+            start, end = map(int, part.split('-'))
+            ports.extend(range(start, end + 1))
         else:
-            ports.add(int(part))
-    return sorted(list(ports))
+            ports.append(int(part))
+    return ports
 
 def find_available_port_in_range(port_list):
-    """find the first available port from the list"""
+    """finds the first available port in the given list"""
     for port in port_list:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -592,93 +461,104 @@ def find_available_port_in_range(port_list):
 
 def run_background_service(updated_public_address: str):
     """
-    this service runs in a separate process and handles two things:
-    1. a periodic heartbeat to the main server.
-    2. a persistent websocket control channel connection.
+    runs the main background service that connects to the control channel.
+    this replaces the old uvicorn server approach.
     """
-    # this function will run in its own process, so it needs to import its own config
-    from tunnel_node import config as t_config
-
-    # also needs to init its own copy of the node cert
-    node_cert = get_node_cert()
-    node_secret_id = get_node_secret_id()
-
+    
     async def background_heartbeat():
-        """sends a heartbeat to the main server every 60 seconds."""
+        """sends periodic heartbeats to keep the node record fresh"""
         while True:
-            await asyncio.sleep(60)
             try:
-                print(f"info:     ({time.ctime()}) sending heartbeat...")
-                headers = {"x-api-key": node_secret_id}
-                payload = {"public_address": updated_public_address, "node_cert": node_cert}
+                await asyncio.sleep(60)  # heartbeat every minute
+                node_info = {
+                    "public_address": updated_public_address,
+                    "cpu_usage": 0.0,  # placeholder
+                    "memory_usage": 0.0,  # placeholder
+                    "active_connections": 0  # placeholder
+                }
+                headers = {"x-node-cert": get_node_cert()}
                 response = requests.post(
                     f"{MAIN_SERVER_URL}/nodes/heartbeat",
+                    json=node_info,
                     headers=headers,
-                    json=payload,
-                    timeout=15,
+                    timeout=10
                 )
-                response.raise_for_status()
-                print("info:     heartbeat successful.")
-            except requests.RequestException as e:
-                print(f"error:    heartbeat failed: {e}")
-
+                if response.status_code == 200:
+                    print("debug:    heartbeat sent successfully")
+                else:
+                    print(f"warn:     heartbeat failed: {response.status_code}")
+            except Exception as e:
+                print(f"error:    heartbeat error: {e}")
 
     async def background_control_channel():
-        """maintains the persistent control channel to the server."""
-        ws_url = MAIN_SERVER_URL.replace("http", "ws")
-        
-        # NOTE: THIS IS THE WORKAROUND. The server expects an api_key.
-        control_uri = f"{ws_url}/internal/control/ws?api_key={node_secret_id}"
-        print(f"debug:    attempting to connect to: {control_uri}")
-        
-        attempts = 0
-        max_attempts = 5
-        base_wait_time = 10  # seconds
-
-        while attempts < max_attempts:
+        """maintains connection to the server's control channel"""
+        while True:
             try:
-                print(f"info:     connecting to control channel... (attempt {attempts + 1})")
-                async with websockets.connect(control_uri) as websocket:
-                    print("info:     background control channel connected.")
-                    attempts = 0 # reset on successful connection
-
-                    # main loop: listen for commands from server
+                node_secret_id = get_node_secret_id()
+                ws_url = f"{MAIN_SERVER_URL.replace('https', 'wss')}/internal/control/ws?api_key={node_secret_id}"
+                
+                print(f"info:     connecting to control channel: {ws_url}")
+                
+                async with websockets.connect(ws_url, ssl=True) as websocket:
+                    print("info:     connected to control channel")
+                    
+                    # send initial status
+                    await websocket.send(json.dumps({
+                        "type": "status_update",
+                        "status": "online",
+                        "public_address": updated_public_address
+                    }))
+                    
+                    # listen for commands
                     async for message in websocket:
                         try:
-                            command = json.loads(message)
-                            print(f"info:     received command: {command}")
-                            # command processing logic would go here
+                            data = json.loads(message)
+                            msg_type = data.get("type")
+                            
+                            if msg_type == "activate_tunnel":
+                                tunnel_id = data.get("tunnel_id")
+                                print(f"info:     received tunnel activation: {tunnel_id}")
+                                # todo: implement tunnel activation logic
+                                await websocket.send(json.dumps({
+                                    "type": "tunnel_status_update",
+                                    "tunnel_id": tunnel_id,
+                                    "status": "active"
+                                }))
+                            
+                            elif msg_type == "deactivate_tunnel":
+                                tunnel_id = data.get("tunnel_id")
+                                print(f"info:     received tunnel deactivation: {tunnel_id}")
+                                # todo: implement tunnel deactivation logic
+                                await websocket.send(json.dumps({
+                                    "type": "tunnel_status_update",
+                                    "tunnel_id": tunnel_id,
+                                    "status": "inactive"
+                                }))
+                                
                         except json.JSONDecodeError:
-                            print("error:    received malformed command from server.")
+                            print(f"warn:     received invalid json from control channel: {message}")
                         except Exception as e:
-                            print(f"error:    error processing command: {e}")
-                    
-            except (websockets.exceptions.InvalidURI, websockets.exceptions.InvalidHandshake) as e:
-                # these are usually permanent errors
-                print(f"error:    background control channel failed: {e}. not retrying.")
-                break
+                            print(f"error:    error processing control channel message: {e}")
+                            
             except Exception as e:
-                attempts += 1
-                wait_time = base_wait_time * (2 ** (attempts - 1))
-                print(f"warn:     background control channel failed: {e}. retrying in {wait_time}s... (attempt {attempts}/{max_attempts})")
-                await asyncio.sleep(wait_time)
+                print(f"error:    control channel connection failed: {e}")
+                print("info:     retrying in 30 seconds...")
+                await asyncio.sleep(30)
 
     async def main():
-        print(f"info:     background service starting (pid: {os.getpid()}) with address {updated_public_address}")
-        # run heartbeat and control channel concurrently
+        """run both background tasks concurrently"""
         await asyncio.gather(
             background_heartbeat(),
             background_control_channel()
         )
 
-    # run the async main function
+    # run the background service
     asyncio.run(main())
-
 
 async def main():
     """main entry point."""
     if os.geteuid() != 0:
-        print("error:    this script must be run as root to bind to low ports and run certbot.")
+        print("error:    this script must be run as root to bind to low ports and manage ssl certificates.")
         # sys.exit(1) # commented for dev
 
     # check if we're already a registered node
@@ -689,7 +569,7 @@ async def main():
         node_record = await get_self_node_record()
         print(f"debug:    node_record result: {node_record}")
         if node_record:
-            print("info:     node verified on server, running full production startup with DNS and SSL...")
+            print("info:     node verified on server, running full production startup with ssl...")
             await main_startup_flow()
         else:
             print("warn:     node certificate exists but node not found on server. re-registering...")
@@ -739,20 +619,8 @@ async def main():
         else:
             print("info:     registration successful! proceeding to production startup.")
             # after successful registration, we must proceed to the main startup flow
-            # which handles DNS, certs, and the final server launch.
+            # which handles ssl certificate generation and the final server launch.
             await main_startup_flow()
 
-
 if __name__ == "__main__":
-    # configure python path to run this script from anywhere
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-
-    # global config setup - no initialization needed
-
-    # set user/group for privilege drop if specified
-    DROP_TO_USER = common_config.get("DROP_TO_USER")
-    DROP_TO_GROUP = common_config.get("DROP_TO_GROUP")
-
     asyncio.run(main())

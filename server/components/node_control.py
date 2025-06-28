@@ -1,6 +1,9 @@
-import time
 import asyncio
 import json
+import os
+import subprocess
+import tempfile
+import time
 from typing import Dict, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, Depends, HTTPException
 from server.components import database
@@ -319,3 +322,186 @@ async def get_active_tunnels(current_user: dict = Depends(get_current_user)):
             })
     
     return {"active_tunnels": active_tunnels}
+
+@router.post("/generate-ssl-certificate")
+async def generate_ssl_certificate(
+    request: Request,
+    node: dict = Depends(get_node_from_api_key)
+):
+    """
+    Server-side SSL certificate generation for nodes.
+    This endpoint generates SSL certificates using DNS challenges without exposing
+    the Cloudflare API credentials to the nodes.
+    """
+    try:
+        payload = await request.json()
+        public_ip = payload.get("public_ip")
+        
+        if not public_ip:
+            raise HTTPException(status_code=400, detail="public_ip is required")
+        
+        node_secret_id = node["node_secret_id"]
+        hostname = node.get("public_hostname")
+        
+        if not hostname:
+            raise HTTPException(status_code=400, detail="Node has no public_hostname")
+        
+        # update dns record first
+        print(f"info:     Updating DNS record for {hostname} to {public_ip}")
+        dns_success = dns.update_node_a_record(hostname, public_ip)
+        
+        if not dns_success:
+            raise HTTPException(status_code=500, detail="Failed to update DNS record")
+        
+        # wait for dns propagation
+        print(f"info:     Waiting for DNS propagation for {hostname}")
+        if not await wait_for_dns_propagation(hostname, public_ip):
+            raise HTTPException(status_code=500, detail="DNS propagation failed")
+        
+        # generate ssl certificate using dns challenge
+        print(f"info:     Generating SSL certificate for {hostname}")
+        cert_data = await generate_certificate_with_dns_challenge(hostname)
+        
+        if not cert_data:
+            raise HTTPException(status_code=500, detail="SSL certificate generation failed")
+        
+        # update node record with certificate info
+        node_update = {
+            "node_secret_id": node_secret_id,
+            "public_address": f"https://{hostname}:443",
+            "verified_ip_address": public_ip,
+            "ssl_cert_generated_at": time.time()
+        }
+        database.upsert_node(node_update)
+        
+        return {
+            "status": "success",
+            "hostname": hostname,
+            "ssl_certificate": cert_data["certificate"],
+            "ssl_private_key": cert_data["private_key"],
+            "certificate_path": f"/etc/letsencrypt/live/{hostname}/fullchain.pem",
+            "private_key_path": f"/etc/letsencrypt/live/{hostname}/privkey.pem"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"error:    SSL certificate generation failed for node {node.get('node_secret_id', 'unknown')}: {e}")
+        raise HTTPException(status_code=500, detail="SSL certificate generation failed")
+
+async def wait_for_dns_propagation(hostname: str, expected_ip: str, max_attempts: int = 30) -> bool:
+    """
+    Wait for DNS propagation to complete by checking if the hostname resolves to the expected IP.
+    """
+    import socket as socket_module
+    
+    print(f"info:     Waiting for DNS propagation: {hostname} -> {expected_ip}")
+    
+    for attempt in range(max_attempts):
+        try:
+            resolved_ip = socket_module.gethostbyname(hostname)
+            if resolved_ip == expected_ip:
+                print(f"info:     DNS propagation successful: {hostname} -> {resolved_ip}")
+                return True
+            else:
+                print(f"debug:    DNS not yet propagated: {hostname} -> {resolved_ip} (expected {expected_ip})")
+        except socket_module.gaierror as e:
+            print(f"debug:    DNS resolution failed for {hostname}: {e}")
+        
+        if attempt < max_attempts - 1:  # don't sleep on the last attempt
+            await asyncio.sleep(10)  # wait 10 seconds between attempts
+    
+    print(f"error:    DNS propagation failed after {max_attempts} attempts")
+    return False
+
+async def generate_certificate_with_dns_challenge(hostname: str) -> Dict[str, str]:
+    """
+    Generate SSL certificate using DNS challenge via Cloudflare.
+    Returns dictionary with certificate and private key content.
+    """
+    # create temporary credentials file
+    creds_file = None
+    try:
+        # import cloudflare credentials from dns component
+        from .dns import CLOUDFLARE_API_TOKEN
+        if not CLOUDFLARE_API_TOKEN:
+            print("error:    Cloudflare API token not available")
+            return None
+        
+        # create temporary credentials file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.ini', delete=False) as f:
+            f.write(f"dns_cloudflare_api_token = {CLOUDFLARE_API_TOKEN}\n")
+            creds_file = f.name
+        
+        # set restrictive permissions
+        os.chmod(creds_file, 0o600)
+        
+        # check if certbot-dns-cloudflare plugin is installed
+        try:
+            result = subprocess.run(["certbot", "plugins"], capture_output=True, text=True)
+            if "dns-cloudflare" not in result.stdout:
+                print("info:     Installing certbot-dns-cloudflare plugin...")
+                subprocess.run(["pip", "install", "certbot-dns-cloudflare"], check=True)
+        except Exception as e:
+            print(f"warn:     Could not check/install certbot plugin: {e}")
+        
+        # run certbot with dns challenge
+        command = [
+            "certbot", "certonly",
+            "--dns-cloudflare",
+            "--dns-cloudflare-credentials", creds_file,
+            "--dns-cloudflare-propagation-seconds", "60",
+            "-d", hostname,
+            "--agree-tos",
+            "-n",  # non-interactive
+            "-m", f"admin@{hostname.split('.', 1)[1]}",  # use domain admin email
+            "--no-eff-email",
+            "--cert-name", hostname,
+            "--verbose"
+        ]
+        
+        print(f"info:     Running certbot: {' '.join(command)}")
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        
+        if result.stdout:
+            print(f"debug:    Certbot output: {result.stdout}")
+        
+        # read generated certificate files
+        cert_path = f"/etc/letsencrypt/live/{hostname}/fullchain.pem"
+        key_path = f"/etc/letsencrypt/live/{hostname}/privkey.pem"
+        
+        if not (os.path.exists(cert_path) and os.path.exists(key_path)):
+            print(f"error:    Certificate files not found after certbot run")
+            return None
+        
+        # read certificate content
+        with open(cert_path, 'r') as f:
+            certificate_content = f.read()
+        
+        with open(key_path, 'r') as f:
+            private_key_content = f.read()
+        
+        print(f"info:     SSL certificate generated successfully for {hostname}")
+        return {
+            "certificate": certificate_content,
+            "private_key": private_key_content
+        }
+        
+    except subprocess.CalledProcessError as e:
+        print(f"error:    Certbot failed: {e}")
+        if e.stdout:
+            print(f"Certbot stdout: {e.stdout}")
+        if e.stderr:
+            print(f"Certbot stderr: {e.stderr}")
+        return None
+    except Exception as e:
+        print(f"error:    Certificate generation failed: {e}")
+        return None
+    finally:
+        # clean up credentials file
+        if creds_file and os.path.exists(creds_file):
+            try:
+                os.remove(creds_file)
+                print("info:     Cleaned up temporary credentials file")
+            except Exception as e:
+                print(f"warn:     Could not clean up credentials file: {e}")

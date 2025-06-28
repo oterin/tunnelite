@@ -8,3 +8,5 @@ python_json_logger
 tinydb
 pyjwt
 python-dotenv
+certbot
+certbot-dns-cloudflare
