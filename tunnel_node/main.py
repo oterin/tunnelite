@@ -17,7 +17,7 @@ from fastapi.responses import PlainTextResponse
 from contextlib import asynccontextmanager
 
 from . import config
-from .connection_manager import manager, TunnelConnection
+from .connection_manager import manager, Connection
 from .proxy_server import start_tcp_listener, proxy_router
 from .network_logger import network_logger, NetworkEvent, NetworkEventType
 
