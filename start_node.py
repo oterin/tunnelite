@@ -55,9 +55,9 @@ async def get_public_ip():
 async def update_dns_record(ip: str):
     """Calls the main server's DDNS endpoint to update this node's A record."""
     print("info:     Notifying main server to update DNS record...")
-    headers = {"x-api-key": common_config.get("NODE_SECRET_ID")}
+    headers = {"x-api-key": get_node_secret_id()}
     payload = {"ip_address": ip}
-    url = f"{common_config.get('MAIN_SERVER_URL')}/internal/control/ddns-update"
+    url = f"{MAIN_SERVER_URL}/internal/control/ddns-update"
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         response.raise_for_status()
@@ -131,8 +131,8 @@ def run_certbot(hostname: str, email: str):
 async def get_self_node_record():
     """Fetches the full details for this node from the main server."""
     print("info:     Fetching node record from main server...")
-    headers = {"x-api-key": common_config.get("NODE_SECRET_ID")}
-    url = f"{common_config.get('MAIN_SERVER_URL')}/nodes/me"
+    headers = {"x-api-key": get_node_secret_id()}
+    url = f"{MAIN_SERVER_URL}/nodes/me"
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
