@@ -1,127 +1,87 @@
+import time
+import asyncio
 import json
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from typing import Dict, Optional
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, Depends, HTTPException
+from server.components import database
+from server.components.auth import get_current_user, get_node_from_api_key
+from server.components import dns
 
-from server.logger import log
-from server import security
+router = APIRouter(prefix="/internal/control", tags=["internal-control"])
 
 class NodeConnectionManager:
-    """manages persistent websocket connections from tunnel nodes."""
     def __init__(self):
-        # maps a node's secret id to its active websocket connection
-        self.active_node_connections: dict[str, WebSocket] = {}
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.node_tunnels: Dict[str, Dict[str, any]] = {}  # node_id -> {tunnel_id: tunnel_data}
 
-    async def connect(self, node_secret_id: str, websocket: WebSocket):
-        """registers a new node connection."""
-        # ws already accepted by the caller; just store reference
-        self.active_node_connections[node_secret_id] = websocket
-        log.info("node control channel connected", extra={"node_secret_id": node_secret_id})
+    async def connect(self, websocket: WebSocket, node_secret_id: str):
+        await websocket.accept()
+        self.active_connections[node_secret_id] = websocket
+        database.update_node_status(node_secret_id, "active")
+        print(f"info:     node {node_secret_id[:8]} connected to control channel.")
 
     def disconnect(self, node_secret_id: str):
-        """removes a node connection."""
-        if node_secret_id in self.active_node_connections:
-            del self.active_node_connections[node_secret_id]
-            log.info("node control channel disconnected", extra={"node_secret_id": node_secret_id})
+        if node_secret_id in self.active_connections:
+            del self.active_connections[node_secret_id]
+        if node_secret_id in self.node_tunnels:
+            del self.node_tunnels[node_secret_id]
+        database.update_node_status(node_secret_id, "offline")
+        print(f"info:     node {node_secret_id[:8]} disconnected from control channel.")
 
-    async def send_message_to_node(self, node_secret_id: str, message: dict) -> bool:
-        """sends a json message to a specific node."""
-        if node_secret_id in self.active_node_connections:
-            websocket = self.active_node_connections[node_secret_id]
+    async def send_message_to_node(self, node_secret_id: str, message: dict):
+        if node_secret_id in self.active_connections:
+            websocket = self.active_connections[node_secret_id]
             try:
                 await websocket.send_json(message)
                 return True
-            except Exception:
-                log.error(
-                    "failed to send message to node control channel",
-                    extra={"node_secret_id": node_secret_id},
-                    exc_info=True
-                )
-                # connection might be broken, disconnect it
+            except Exception as e:
+                print(f"error:    could not send message to node {node_secret_id[:8]}: {e}")
                 self.disconnect(node_secret_id)
+                return False
         return False
 
+    async def activate_tunnel_on_node(self, node_secret_id: str, tunnel_data: dict):
+        """Send tunnel activation command to a specific node"""
+        message = {
+            "type": "activate_tunnel",
+            "tunnel_id": tunnel_data["tunnel_id"],
+            "tunnel_type": tunnel_data["tunnel_type"],
+            "local_port": tunnel_data.get("local_port"),
+            "public_url": tunnel_data["public_url"]
+        }
+        
+        success = await self.send_message_to_node(node_secret_id, message)
+        if success:
+            # Track this tunnel on this node
+            if node_secret_id not in self.node_tunnels:
+                self.node_tunnels[node_secret_id] = {}
+            self.node_tunnels[node_secret_id][tunnel_data["tunnel_id"]] = tunnel_data
+            print(f"info:     activated tunnel {tunnel_data['tunnel_id'][:8]} on node {node_secret_id[:8]}")
+        
+        return success
 
-# create a shared instance for the application to use
+    async def deactivate_tunnel_on_node(self, node_secret_id: str, tunnel_id: str):
+        """Send tunnel deactivation command to a specific node"""
+        message = {
+            "type": "deactivate_tunnel",
+            "tunnel_id": tunnel_id
+        }
+        
+        success = await self.send_message_to_node(node_secret_id, message)
+        if success:
+            # Remove from tracking
+            if node_secret_id in self.node_tunnels and tunnel_id in self.node_tunnels[node_secret_id]:
+                del self.node_tunnels[node_secret_id][tunnel_id]
+            print(f"info:     deactivated tunnel {tunnel_id[:8]} on node {node_secret_id[:8]}")
+        
+        return success
+
+    def get_node_tunnels(self, node_secret_id: str) -> Dict[str, any]:
+        """Get all tunnels currently active on a specific node"""
+        return self.node_tunnels.get(node_secret_id, {})
+
+    def is_node_online(self, node_secret_id: str) -> bool:
+        """Check if a node is currently connected"""
+        return node_secret_id in self.active_connections
+
 node_manager = NodeConnectionManager()
-
-# create the router for this component
-router = APIRouter(tags=["node control"])
-
-
-@router.websocket("/ws/node-control-jwt")
-async def node_control_websocket_jwt(websocket: WebSocket):
-    """jwt-based node control channel"""
-    node_secret_id = None
-    try:
-        await websocket.accept()
-        
-        # get token from query params
-        token = websocket.query_params.get("token")
-        if not token:
-            await websocket.close(code=1008, reason="missing token")
-            return
-            
-        claims = security.verify(token)
-        node_secret_id = claims["sub"]
-        
-        await node_manager.connect(node_secret_id, websocket)
-        
-        # keep connection alive
-        while True:
-            await websocket.receive_text()
-            
-    except ValueError as e:
-        if websocket.client_state.name != "DISCONNECTED":
-            await websocket.close(code=1008, reason=f"auth failed: {e}")
-    except WebSocketDisconnect:
-        if node_secret_id:
-            node_manager.disconnect(node_secret_id)
-    except Exception:
-        log.error(
-            "error in jwt node control websocket",
-            extra={"node_secret_id": node_secret_id},
-            exc_info=True
-        )
-        if node_secret_id:
-            node_manager.disconnect(node_secret_id)
-
-@router.websocket("/ws/node-control")
-async def node_control_websocket(websocket: WebSocket):
-    """
-    this endpoint handles the persistent control channel from each tunnel node.
-    nodes connect here to receive real-time commands from the server.
-    """
-    node_secret_id = None
-    try:
-        # accept the connection before reading any messages
-        await websocket.accept()
-        
-        # the first message from the node must be an auth message
-        auth_message = await websocket.receive_json()
-        if auth_message.get("type") != "auth":
-            await websocket.close(code=1008, reason="auth message required")
-            return
-
-        node_secret_id = auth_message.get("node_secret_id")
-        if not node_secret_id:
-            await websocket.close(code=1008, reason="node_secret_id is required for auth")
-            return
-
-        await node_manager.connect(node_secret_id, websocket)
-
-        # keep the connection open to listen for disconnect
-        while True:
-            # this is a one-way channel (server -> node), so we just wait.
-            # a client-side disconnect will raise WebSocketDisconnect here.
-            await websocket.receive_text()
-
-    except WebSocketDisconnect:
-        if node_secret_id:
-            node_manager.disconnect(node_secret_id)
-    except Exception:
-        log.error(
-            "an unexpected error occurred in the node control websocket",
-            extra={"node_secret_id": node_secret_id},
-            exc_info=True
-        )
-        if node_secret_id:
-            node_manager.disconnect(node_secret_id)
