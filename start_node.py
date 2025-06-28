@@ -199,8 +199,10 @@ async def main_startup_flow():
         port=main_server_port,
         ssl_keyfile=key_path,
         ssl_certfile=cert_path,
-        # use a reasonable number of worker processes
-        workers=common_config.get("UVICORN_WORKERS", 2), 
+        # use single worker for ssl stability
+        workers=1,
+        access_log=True,
+        log_level="info"
     )
 
 # --- phase 1: interactive registration logic ---
