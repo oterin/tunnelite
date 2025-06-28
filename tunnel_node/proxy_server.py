@@ -287,8 +287,9 @@ async def start_tcp_listener(tunnel_id: str, port: int):
     """starts a dedicated tcp listener for a single tunnel on a specific port."""
     try:
         # create listener with SO_REUSEADDR to allow immediate port reuse
-        listener = await anyio.create_tcp_listener(local_port=port, reuse_port=True)
-        print(f"info:     tcp listener started for tunnel {tunnel_id} on port {port}")
+        # explicitly bind to all interfaces (0.0.0.0) to allow external access
+        listener = await anyio.create_tcp_listener(local_host='0.0.0.0', local_port=port, reuse_port=True)
+        print(f"info:     tcp listener started for tunnel {tunnel_id} on 0.0.0.0:{port}")
         handler = lambda client: tcp_proxy_handler(client, tunnel_id)
         await listener.serve(handler)
     except Exception as e:
