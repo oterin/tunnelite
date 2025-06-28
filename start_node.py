@@ -12,6 +12,8 @@ from urllib.parse import urlparse, urlunparse
 import requests
 import uvicorn
 import websockets
+import subprocess
+from tunnel_node import config
 
 # these imports are now relative to the project root
 from tunnel_node.main import app as fastapi_app
@@ -26,69 +28,171 @@ RAW_MAIN_SERVER_URL = common_config.get("TUNNELITE_SERVER_URL", "https://api.tun
 # admin key for registration
 ADMIN_API_KEY = common_config.get("TUNNELITE_ADMIN_KEY")
 
-def get_public_ip():
-    """auto-detect public ip address"""
+async def get_public_ip():
+    """Uses a third-party service to determine the node's public IP address."""
     try:
-        # try multiple services for reliability
-        services = [
-            "https://api.ipify.org",
-            "https://ifconfig.me", 
-            "https://icanhazip.com"
-        ]
-        
-        for service in services:
-            try:
-                response = requests.get(service, timeout=5)
-                if response.status_code == 200:
-                    return response.text.strip()
-            except:
-                continue
-        
-        # fallback: try to detect from local network interfaces
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
-        return local_ip
-        
-    except Exception as e:
-        print(f"warn:     could not auto-detect public ip: {e}")
-        return "127.0.0.1"  # fallback
+        print("info:     Fetching public IP address...")
+        response = requests.get("https://api.ipify.org?format=json", timeout=10)
+        response.raise_for_status()
+        ip = response.json()["ip"]
+        print(f"info:     Public IP address is {ip}")
+        return ip
+    except requests.RequestException as e:
+        print(f"error:    Could not fetch public IP: {e}")
+        return None
 
-# auto-detect public ip
-PUBLIC_IP = get_public_ip()
-print(f"info:     detected public ip: {PUBLIC_IP}")
-
-# NODE_PUBLIC_ADDRESS will be set dynamically with actual port
-NODE_PUBLIC_ADDRESS = None
-
-def get_public_url(base_url: str) -> str:
-    """
-    parses a url and ensures it points to the standard public port (443 for https).
-    this prevents errors when an internal port is accidentally included in the env var.
-    """
+async def update_dns_record(ip: str):
+    """Calls the main server's DDNS endpoint to update this node's A record."""
+    print("info:     Notifying main server to update DNS record...")
+    headers = {"x-api-key": config.get("NODE_SECRET_ID")}
+    payload = {"ip_address": ip}
+    url = f"{config.get('MAIN_SERVER_URL')}/internal/control/ddns-update"
     try:
-        parsed = urlparse(base_url)
-        # if scheme is https, we rebuild the url without a port, implying default port 443
-        if parsed.scheme == "https":
-            return urlunparse((parsed.scheme, parsed.hostname or '', parsed.path, '', '', ''))
-        # for http (local dev), keep the port
-        return base_url
-    except Exception:
-        # fallback to the raw url if parsing fails
-        return base_url
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response.raise_for_status()
+        print(f"info:     Successfully notified server of new IP: {ip}")
+        return True
+    except requests.RequestException as e:
+        print(f"error:    Failed to update DNS record via server: {e}")
+        if e.response:
+            print(f"error details: {e.response.text}")
+        return False
 
-MAIN_SERVER_URL = get_public_url(RAW_MAIN_SERVER_URL)
+async def wait_for_dns_propagation(hostname: str, expected_ip: str):
+    """
+    Periodically checks DNS until the new IP address has propagated.
+    This is crucial before attempting to get an SSL certificate.
+    """
+    print(f"info:     Waiting for DNS propagation for {hostname} to point to {expected_ip}...")
+    # Wait up to 120 seconds (12 tries * 10s sleep)
+    for i in range(12):
+        try:
+            # Note: This checks the DNS resolution from where the node is running.
+            # This is a good indicator but not a guarantee of global propagation.
+            resolved_ip = socket.gethostbyname(hostname)
+            if resolved_ip == expected_ip:
+                print("info:     DNS propagation successful!")
+                return True
+            else:
+                print(f"debug:    DNS resolved to {resolved_ip}, waiting...")
+        except socket.gaierror:
+            print("debug:    DNS record not found yet, waiting...")
+        
+        await asyncio.sleep(10)
+        
+    print(f"error:    DNS for {hostname} did not propagate to {expected_ip} in time.")
+    return False
 
-# --- static node configuration ---
-DROP_TO_USER = "tunnelite"      # user to drop privs to
-DROP_TO_GROUP = "tunnelite"     # group to drop privs to
-CERT_FILE = "ssl/cert.pem"       # tls cert for node
-KEY_FILE = "ssl/key.pem"         # tls key for node
-SECRET_ID_FILE = "node_secret_id.txt"  # local file storing node uuid
-BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024  # 10 mb payload for bandwidth test
-CERT_TOKEN_FILE = "node_cert.txt"     # jwt token for node auth
+def run_certbot(hostname: str, email: str):
+    """
+    Executes Certbot to obtain/renew an SSL certificate for the node's hostname.
+    Assumes Certbot is installed on the system.
+    """
+    print("info:     Running Certbot to obtain SSL certificate...")
+    # This command tells Certbot to get a certificate using the webroot plugin,
+    # placing its challenge files where our FastAPI app can serve them.
+    # The ACME_CHALLENGE_DIR must match the one in tunnel_node/main.py
+    ACME_CHALLENGE_DIR = "/tmp/acme-challenges"
+    command = [
+        "certbot", "certonly",
+        "--webroot", "-w", ACME_CHALLENGE_DIR,
+        "-d", hostname,
+        "--agree-tos",
+        "-n",  # Non-interactive
+        "-m", email,
+        "--no-eff-email", # Don't ask to be on the EFF mailing list
+        "--cert-name", hostname # Ensures we renew the correct cert
+    ]
+    try:
+        # Using check=True will raise an exception if Certbot fails
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        print("info:     Certbot run successful.")
+        return True
+    except FileNotFoundError:
+        print("error:    'certbot' command not found. Please ensure it is installed and in the system's PATH.")
+        return False
+    except subprocess.CalledProcessError as e:
+        print("error:    Certbot failed.")
+        print(f"Certbot stdout: {e.stdout}")
+        print(f"Certbot stderr: {e.stderr}")
+        return False
+
+async def get_self_node_record():
+    """Fetches the full details for this node from the main server."""
+    print("info:     Fetching node record from main server...")
+    headers = {"x-api-key": config.get("NODE_SECRET_ID")}
+    url = f"{config.get('MAIN_SERVER_URL')}/nodes/me"
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f"error:    Could not fetch node record: {e}")
+        return None
+
+async def main_startup_flow():
+    """The main orchestration logic for node startup."""
+    
+    # 1. Get this node's details from the server
+    node_record = await get_self_node_record()
+    if not node_record:
+        print("critical: Cannot start without node record. Exiting.")
+        return
+
+    hostname = node_record.get("public_hostname")
+    # Assuming the server provides the owner's email for Certbot registration
+    admin_email = node_record.get("owner_email", "admin@" + config.get("TUNNELITE_DOMAIN", "tunnelite.ws"))
+    port_range = node_record.get("port_range", [])
+    
+    if not all([hostname, port_range]):
+        print("critical: Node record is missing hostname or port_range. Exiting.")
+        return
+        
+    # We will use the first port in the assigned range for the main server
+    main_server_port = port_range[0]
+
+    # 2. Determine public IP and update DNS via the server
+    public_ip = await get_public_ip()
+    if not public_ip:
+        print("critical: Could not determine public IP. Exiting.")
+        return
+        
+    if not await update_dns_record(public_ip):
+        print("critical: Could not update DNS record. Exiting.")
+        return
+
+    # 3. Wait for the DNS change to propagate
+    if not await wait_for_dns_propagation(hostname, public_ip):
+        print("critical: DNS did not propagate. Tunnel will not be reachable. Exiting.")
+        return
+
+    # 4. Run Certbot to get/renew SSL certificates
+    cert_path = f"/etc/letsencrypt/live/{hostname}/fullchain.pem"
+    key_path = f"/etc/letsencrypt/live/{hostname}/privkey.pem"
+
+    # We can force a renewal check, or just run it if the cert doesn't exist.
+    # Certbot is smart enough not to re-issue if the cert is still valid.
+    if not run_certbot(hostname, admin_email):
+        print("critical: Could not obtain SSL certificate. Cannot start production server.")
+        return
+
+    # 5. Final check for certificate files
+    if not (os.path.exists(cert_path) and os.path.exists(key_path)):
+        print(f"critical: SSL certificates not found at expected path after Certbot run. Aborting.")
+        return
+
+    # 6. Start the production Uvicorn server with the new SSL certs
+    print(f"info:     Starting production server for {hostname} on port {main_server_port} with SSL...")
+    
+    uvicorn.run(
+        "tunnel_node.main:app",
+        host="0.0.0.0",
+        port=main_server_port,
+        ssl_keyfile=key_path,
+        ssl_certfile=cert_path,
+        # Use a reasonable number of worker processes
+        workers=config.get("UVICORN_WORKERS", 2), 
+    )
 
 # --- phase 1: interactive registration logic ---
 
@@ -490,177 +594,7 @@ def run_background_service(updated_public_address: str):
 # --- main entrypoint ---
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
-        sys.exit("error: this script is not supported on windows.")
-
-    node_secret_id = get_node_secret_id()
-    print(f"info:     node secret id: {node_secret_id}")
-
-    print("info:     checking registration status with main server...")
-    is_registered_and_approved = False
     try:
-        res = requests.get(
-            f"{MAIN_SERVER_URL}/nodes/me",
-            headers={"x-node-secret-id": node_secret_id},
-            timeout=10,
-            verify=True
-        )
-        if res.status_code == 200:
-            if res.json().get("status") == "approved":
-                is_registered_and_approved = True
-                print("info:     node is already registered and approved.")
-            else:
-                print(f"info:     node is registered but has status '{res.json().get('status')}'. starting registration...")
-        elif res.status_code == 404:
-            print("info:     node is not yet registered.")
-        else:
-            print(f"warn:     received unexpected status from server: {res.status_code} {res.text}")
-    except requests.RequestException as e:
-        sys.exit(f"error: could not contact main server at {MAIN_SERVER_URL}. ({e})")
-
-    if not is_registered_and_approved:
-        if not ADMIN_API_KEY:
-            sys.exit("error: admin key missing in values.json")
-
-        temp_server_process = Process(target=run_temp_api_server)
-        temp_server_process.start()
-        print(f"info:     temporary api server started with pid: {temp_server_process.pid}")
-        time.sleep(3)
-
-        # verify the temp server is responding
-        temp_port = 8201  # use the same port as temp server
-        temp_url = f"http://127.0.0.1:{temp_port}"
-        for attempt in range(10):  # try for up to 10 seconds
-            try:
-                response = requests.get(f"{temp_url}/ping", timeout=2)
-                if response.status_code == 200:
-                    print(f"info:     temporary server is responding on {temp_url}")
-                    break
-            except requests.RequestException:
-                pass
-            time.sleep(1)
-            print(f"info:     waiting for temporary server... (attempt {attempt + 1}/10)")
-        else:
-            print("error:    temporary server is not responding after 10 seconds")
-            temp_server_process.terminate()
-            temp_server_process.join()
-            sys.exit("error: could not start temporary api server")
-
-        registration_success = asyncio.run(run_interactive_registration(node_secret_id))
-
-        print("info:     terminating temporary api server...")
-        temp_server_process.terminate()
-        temp_server_process.join()
-
-        if not registration_success:
-            sys.exit("error: node registration failed. please check logs and try again.")
-        print("info:     registration successful! proceeding to production startup.")
-
-    if os.geteuid() != 0:
-        sys.exit("error: must run as root to start production server and bind privileged ports.")
-
-    print("info:     starting production server...")
-    if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):
-        sys.exit(f"error: ssl certificate '{CERT_FILE}' or key '{KEY_FILE}' not found.")
-
-    # get available ports from the node's registered range
-    available_ports = get_node_port_range()
-    if not available_ports:
-        sys.exit("error: could not get port range from server or no ports available")
-    
-    # find an available port in the range
-    chosen_port = find_available_port_in_range(available_ports)
-    if not chosen_port:
-        sys.exit(f"error: no available ports in range {available_ports}")
-
-    # set the public address to reflect the actual port we're running on
-    # this ensures heartbeats and client connections use the correct port
-    updated_public_address = f"https://{PUBLIC_IP}:{chosen_port}"
-    
-    print(f"info:     setting public address to {updated_public_address}")
-    
-    # update the global variable so heartbeats use the correct address
-    NODE_PUBLIC_ADDRESS = updated_public_address
-    
-    # also update the tunnel_node config
-    from tunnel_node import config as tunnel_config
-    tunnel_config.set_node_public_address(chosen_port)
-    
-    # send an immediate heartbeat to update the server with the correct address
-    print(f"info:     sending immediate heartbeat to update server with correct address...")
-    try:
-        node_cert = get_node_cert()
-        immediate_heartbeat_data = {
-            "node_secret_id": node_secret_id,
-            "public_address": updated_public_address,
-            "metrics": {
-                "cpu_percent": 0,
-                "memory_percent": 0,
-                "active_connections": 0
-            }
-        }
-        
-        if node_cert:
-            try:
-                response = requests.post(
-                    f"{MAIN_SERVER_URL}/nodes/heartbeat",
-                    json=immediate_heartbeat_data,
-                    headers={"x-node-cert": node_cert},
-                    timeout=10
-                )
-            except requests.RequestException:
-                response = requests.post(
-                    f"{MAIN_SERVER_URL}/nodes/register",
-                    json=immediate_heartbeat_data,
-                    timeout=10
-                )
-        else:
-            response = requests.post(
-                f"{MAIN_SERVER_URL}/nodes/register",
-                json=immediate_heartbeat_data,
-                timeout=10
-            )
-        
-        response.raise_for_status()
-        print(f"info:     immediate heartbeat successful - server now has correct address {updated_public_address}")
-        
-    except requests.RequestException as e:
-        print(f"warn:     immediate heartbeat failed: {e}, background service will retry")
-
-    try:
-        https_socket = socket(AF_INET, SOCK_STREAM)
-        https_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        https_socket.bind(('', chosen_port))
-        https_socket.listen(128)
-        print(f"info:     https socket bound to 0.0.0.0:{chosen_port} by main process (pid: {os.getpid()})")
-    except Exception as e:
-        sys.exit(f"error: failed to bind socket on port {chosen_port}: {e}")
-
-    # start background service in main process
-    background_service_process = Process(target=run_background_service, args=(updated_public_address,))
-    background_service_process.start()
-    print(f"info:     background service started with pid: {background_service_process.pid}")
-
-    # use only 1 worker process to avoid confusion
-    max_workers = 1
-    print(f"info:     spawning {max_workers} worker process...")
-    workers = []
-    for _ in range(max_workers):
-        worker = Process(target=start_worker_process, args=(https_socket,))
-        workers.append(worker)
-        worker.start()
-
-    https_socket.close()
-
-    try:
-        for worker in workers:
-            worker.join()
+        asyncio.run(main_startup_flow())
     except KeyboardInterrupt:
-        print("\ninfo:     shutting down main process...")
-        background_service_process.terminate()
-        background_service_process.join()
-        for worker in workers:
-            worker.terminate()
-            worker.join()
-
-    print("info:     main process exited.")
+        print("\ninfo:     Shutting down node.")

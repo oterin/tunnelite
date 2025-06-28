@@ -194,3 +194,4 @@ cython_debug/
 .cursorindexingignore
 silly.py
 silly.txt
+server/dns_secrets.json

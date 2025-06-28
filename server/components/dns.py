@@ -2,11 +2,21 @@ import os
 import requests
 from typing import List, Dict, Any
 
-# load your main domain and api keys from config/environment variables
-# ensure these are in your config file or environment
-SPACESHIP_API_KEY = os.environ.get("SPACESHIP_API_KEY")
-SPACESHIP_API_SECRET = os.environ.get("SPACESHIP_API_SECRET")
-BASE_DOMAIN = os.environ.get("TUNNELITE_DOMAIN", "tunnelite.ws")
+# load spaceship api keys and base domain from server/dns_secrets.json
+import json
+
+secrets_path = os.path.join(os.path.dirname(__file__), "..", "dns_secrets.json")
+try:
+    with open(secrets_path, "r") as f:
+        _dns_secrets = json.load(f)
+        SPACESHIP_API_KEY = _dns_secrets.get("SPACESHIP_API_KEY")
+        SPACESHIP_API_SECRET = _dns_secrets.get("SPACESHIP_API_SECRET")
+        BASE_DOMAIN = _dns_secrets.get("BASE_DOMAIN", "tunnelite.ws")
+except Exception as e:
+    print(f"error:    could not load dns_secrets.json: {e}")
+    SPACESHIP_API_KEY = None
+    SPACESHIP_API_SECRET = None
+    BASE_DOMAIN = "tunnelite.ws"
 
 API_BASE_URL = "https://spaceship.dev/api/v1"
 

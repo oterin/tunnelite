@@ -13,9 +13,11 @@ import psutil
 import websockets
 import socket
 import os
+from fastapi.responses import PlainTextResponse
+from contextlib import asynccontextmanager
 
 from . import config
-from .connection_manager import manager
+from .connection_manager import manager, TunnelConnection
 from .proxy_server import start_tcp_listener, proxy_router
 from .network_logger import network_logger, NetworkEvent, NetworkEventType
 
@@ -41,6 +43,24 @@ BENCHMARK_PAYLOAD_SIZE = 10 * 1024 * 1024
 
 # flag to control whether background tasks should start (only in main process)
 ENABLE_BACKGROUND_TASKS = os.environ.get("ENABLE_BACKGROUND_TASKS", "true").lower() == "true"
+
+# Directory where Certbot will place challenge files
+ACME_CHALLENGE_DIR = "/tmp/acme-challenges"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure the ACME challenge directory exists on startup
+    os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+    print(f"info:     ACME challenge directory prepared at {ACME_CHALLENGE_DIR}")
+    
+    # This is the main connection to the central server's control plane
+    # It handles heartbeats and commands like 'teardown_tunnel'
+    # We pass the manager instance to it so it can act on the commands
+    asyncio.create_task(manager.connect_to_control_plane())
+    
+    yield
+    # Clean up resources, if any, on shutdown
+    print("info:     shutting down node server.")
 
 async def heartbeat_task():
     while True:
@@ -529,6 +549,32 @@ def get_node_cert() -> str:
             return f.read().strip()
     except FileNotFoundError:
         return ""
+
+@app.get("/internal/health")
+async def health_check():
+    """A simple health check endpoint for the node itself."""
+    return {"status": "ok", "timestamp": time.time()}
+
+@app.get("/.well-known/acme-challenge/{token}")
+async def handle_acme_challenge(token: str):
+    """
+    An endpoint to solve the HTTP-01 challenge from Let's Encrypt.
+    Certbot will place a file in our challenge directory, and this
+    endpoint will serve it, allowing for automated SSL certificate issuance.
+    """
+    challenge_file_path = os.path.join(ACME_CHALLENGE_DIR, token)
+    
+    print(f"debug:    ACME challenge received for token: {token}")
+    print(f"debug:    Looking for file at: {challenge_file_path}")
+
+    if os.path.exists(challenge_file_path) and os.path.isfile(challenge_file_path):
+        with open(challenge_file_path, "r") as f:
+            content = f.read()
+            print(f"debug:    Found challenge file, serving content.")
+            return PlainTextResponse(content)
+    
+    print(f"error:    Challenge token not found for token: {token}")
+    return PlainTextResponse("Challenge token not found.", status_code=404)
 
 # include the new proxy router. this must be last.
 app.include_router(proxy_router)
