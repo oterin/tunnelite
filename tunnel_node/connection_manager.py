@@ -1,6 +1,7 @@
 import asyncio
+import secrets
 import time
-from typing import Optional
+from typing import Optional, Tuple
 from fastapi import WebSocket
 
 class Connection:
@@ -9,7 +10,10 @@ class Connection:
         self.websocket = websocket
         self.tunnel_id = tunnel_id
         self.public_hostname = public_hostname
-        self.response_queue: asyncio.Queue = asyncio.Queue()
+        # http tunnels are request/response, so one queue is fine.
+        self.http_response_queue: asyncio.Queue = asyncio.Queue()
+        # tcp tunnels can have many concurrent connections. we need a queue for each.
+        self.tcp_response_queues: dict[str, asyncio.Queue] = {}
         self.tcp_server_task: Optional[asyncio.Task] = None
         # metrics for this connection
         self.bytes_in: int = 0         # data from public internet -> user client
@@ -57,15 +61,54 @@ class ConnectionManager:
                   f"packets_in={connection.packets_in}, packets_out={connection.packets_out}, "
                   f"bytes_in={connection.bytes_in}, bytes_out={connection.bytes_out}")
 
-    async def forward_to_client(self, tunnel_id: str, data: bytes):
+    def register_tcp_sub_connection(self, tunnel_id: str) -> Optional[Tuple[str, asyncio.Queue]]:
+        """creates a new response queue for a concurrent tcp connection."""
+        if tunnel_id in self.tunnels_by_id:
+            connection = self.tunnels_by_id[tunnel_id]
+            sub_connection_id = secrets.token_hex(4)
+            queue = asyncio.Queue()
+            connection.tcp_response_queues[sub_connection_id] = queue
+            return sub_connection_id, queue
+        return None
+
+    def unregister_tcp_sub_connection(self, tunnel_id: str, sub_connection_id: str):
+        """removes the response queue for a closed tcp connection."""
+        if tunnel_id in self.tunnels_by_id:
+            connection = self.tunnels_by_id[tunnel_id]
+            connection.tcp_response_queues.pop(sub_connection_id, None)
+
+    async def send_control_message_to_client(self, tunnel_id: str, sub_connection_id: str, frame_type: bytes):
+        """sends a control frame (e.g., close) to the client for a specific sub-connection."""
+        if tunnel_id in self.tunnels_by_id:
+            try:
+                connection = self.tunnels_by_id[tunnel_id]
+                id_bytes = sub_connection_id.encode('utf-8')
+                id_len = len(id_bytes)
+                payload = frame_type + id_len.to_bytes(1, 'big') + id_bytes
+                await connection.websocket.send_bytes(payload)
+            except Exception:
+                # client likely disconnected, safe to ignore
+                pass
+
+    async def forward_to_client(self, tunnel_id: str, data: bytes, sub_connection_id: Optional[str] = None):
         """forwards raw data from a public connection (http or tcp) to the client."""
         if tunnel_id in self.tunnels_by_id:
             connection = self.tunnels_by_id[tunnel_id]
-            # increment metrics as data flows into the tunnel from the public
-            connection.bytes_in += len(data)
-            connection.packets_in += 1
             connection.last_activity = time.time()
-            await connection.websocket.send_bytes(data)
+            
+            payload = data
+            # for tcp, we frame the data with the sub-connection id
+            if sub_connection_id:
+                # [type (1 byte)] + [id_len (1 byte)] + [id] + [data]
+                id_bytes = sub_connection_id.encode('utf-8')
+                id_len = len(id_bytes)
+                payload = b'T' + id_len.to_bytes(1, 'big') + id_bytes + data
+            else: # for http, we just mark it as http data
+                payload = b'H' + data
+
+            connection.bytes_in += len(payload)
+            connection.packets_in += 1
+            await connection.websocket.send_bytes(payload)
 
     async def get_http_response_from_client(self, public_hostname: str, timeout: int = 10) -> bytes:
         """waits for a single http response to come back from the client for a specific tunnel."""
@@ -73,7 +116,7 @@ class ConnectionManager:
             connection = self.tunnels_by_hostname[public_hostname]
             try:
                 # wait for the response to be put into the queue.
-                return await asyncio.wait_for(connection.response_queue.get(), timeout)
+                return await asyncio.wait_for(connection.http_response_queue.get(), timeout)
             except asyncio.TimeoutError:
                 return b"HTTP/1.1 504 Gateway Timeout\r\n\r\nTunnel Timeout"
         return b"HTTP/1.1 404 Not Found\r\n\r\nTunnel Not Found"
@@ -87,14 +130,44 @@ class ConnectionManager:
         return self.tunnels_by_hostname.get(hostname)
 
     async def forward_to_proxy(self, tunnel_id: str, data: bytes):
-        """forwards a response from the client back to the proxy server via the queue."""
-        if tunnel_id in self.tunnels_by_id:
-            connection = self.tunnels_by_id[tunnel_id]
-            # increment metrics as data flows out of the tunnel to the public
-            connection.bytes_out += len(data)
-            connection.packets_out += 1
-            connection.last_activity = time.time()
-            await connection.response_queue.put(data)
+        """forwards a response from the client back to the correct proxy server queue."""
+        if tunnel_id not in self.tunnels_by_id:
+            return
+            
+        connection = self.tunnels_by_id[tunnel_id]
+        connection.last_activity = time.time()
+        connection.bytes_out += len(data)
+        connection.packets_out += 1
+
+        data_type = data[0:1]
+        
+        if data_type == b'H':
+            # http data goes to the single http queue
+            await connection.http_response_queue.put(data[1:])
+        elif data_type == b'T':
+            # tcp data is demultiplexed to the correct sub-connection queue
+            try:
+                id_len = int.from_bytes(data[1:2], 'big')
+                sub_connection_id = data[2:2+id_len].decode('utf-8')
+                payload = data[2+id_len:]
+                
+                if sub_connection_id in connection.tcp_response_queues:
+                    await connection.tcp_response_queues[sub_connection_id].put(payload)
+                else:
+                    # this can happen if the tcp connection was already closed by the node
+                    # but the client sent a final packet. it's safe to ignore.
+                    pass
+            except (IndexError, UnicodeDecodeError):
+                print(f"error:    could not parse client tcp frame for tunnel {tunnel_id[:8]}")
+        elif data_type == b'C': # Close frame from client
+            try:
+                id_len = int.from_bytes(data[1:2], 'big')
+                sub_connection_id = data[2:2+id_len].decode('utf-8')
+                if sub_connection_id in connection.tcp_response_queues:
+                    # a None in the queue is the signal to close the connection.
+                    await connection.tcp_response_queues[sub_connection_id].put(None)
+            except (IndexError, UnicodeDecodeError):
+                print(f"error:    could not parse client close frame for tunnel {tunnel_id[:8]}")
 
     async def close_tunnel(self, tunnel_id: str) -> bool:
         """closes a tunnel connection and cleans up its resources immediately."""

@@ -3,6 +3,7 @@ import time
 from fastapi import APIRouter, Request, Response, HTTPException, status
 from .connection_manager import manager
 from .network_logger import NetworkEvent, NetworkEventType, network_logger
+import asyncio
 
 # a new router for the proxy logic.
 # it has no prefix, so its routes are at the root of the app.
@@ -132,14 +133,28 @@ async def http_proxy_catch_all(request: Request, full_path: str):
 
 async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: str):
     """handles a single public tcp connection and proxies data in both directions."""
-    client_addr = "unknown"
-    client_port = None
+    client_addr, client_port = "unknown", None
     
     try:
-        if hasattr(client_stream, 'socket') and hasattr(client_stream.socket, 'getpeername'):
-            client_addr, client_port = client_stream.socket.getpeername()
-    except:
+        # use anyio's recommended way to get peer name for better compatibility
+        peername = client_stream.extra(anyio.abc.SocketAttribute.peername)
+        if isinstance(peername, (tuple, list)) and len(peername) >= 2:
+            client_addr, client_port = peername[:2]
+        elif isinstance(peername, str):
+            # handle unix domain sockets if they are ever used
+            client_addr = peername
+            client_port = 0 # unix sockets don't have a port
+    except Exception:
+        # if we can't get the peername, we just log it as unknown.
+        # this isn't critical for the proxy to function.
         pass
+    
+    # register this new tcp connection to get a unique id and a dedicated data queue
+    reg_result = manager.register_tcp_sub_connection(tunnel_id)
+    if not reg_result:
+        print(f"error:    could not register sub-connection for tunnel {tunnel_id}, closing.")
+        return
+    sub_connection_id, response_queue = reg_result
     
     # log connection open
     network_logger.log_event(NetworkEvent(
@@ -187,7 +202,7 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
                         print(f"tcp:      tunnel {tunnel_id[:8]} → client: packet #{packet_count_in}, {len(data)} bytes (total: {bytes_in} bytes)")
                         
                         print(f"debug:    forwarding {len(data)} bytes to client via websocket")
-                        await manager.forward_to_client(tunnel_id, data)
+                        await manager.forward_to_client(tunnel_id, data, sub_connection_id)
                 except (anyio.EndOfStream, anyio.BrokenResourceError, anyio.ClosedResourceError):
                     # client disconnected cleanly
                     pass
@@ -199,14 +214,10 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
             async def ws_to_public():
                 nonlocal packet_count_out, bytes_out
                 try:
-                    connection = manager.get_connection_by_id(tunnel_id)
-                    if not connection:
-                        return
-
                     while True:
                         try:
                             print(f"debug:    waiting for response from client via websocket...")
-                            response_data = await connection.response_queue.get()
+                            response_data = await response_queue.get()
                             if response_data is None: 
                                 print(f"debug:    received None from response queue, breaking")
                                 break
@@ -251,14 +262,20 @@ async def tcp_proxy_handler(client_stream: anyio.abc.SocketStream, tunnel_id: st
             event_type=NetworkEventType.ERROR,
             tunnel_id=tunnel_id,
             client_ip=client_addr,
-            error_message=f"tcp proxy handler failed: {e}",
-            metadata={"packets_in": packet_count_in, "packets_out": packet_count_out}
+            port=client_port,
+            protocol="tcp",
+            error_message=f"error in tcp handler: {e}"
         ))
-        
-        print(f"error:    tcp proxy handler for {tunnel_id} failed: {e}")
     finally:
+        # ensure the queue for this sub-connection is removed on exit
+        manager.unregister_tcp_sub_connection(tunnel_id, sub_connection_id)
+
+        # also notify the client to close this sub-connection as well
+        asyncio.create_task(
+            manager.send_control_message_to_client(tunnel_id, sub_connection_id, b'C')
+        )
+
         duration = time.time() - start_time
-        
         # log connection close
         network_logger.log_event(NetworkEvent(
             timestamp=time.time(),

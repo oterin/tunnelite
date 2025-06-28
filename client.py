@@ -7,7 +7,7 @@ import subprocess
 import platform
 import sys
 import time
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -510,113 +510,121 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
                         live.update(make_layout("active", public_url))
                         
                 elif tunnel_type in ["tcp", "udp"]:
-                    add_network_event("tunnel", f"starting {tunnel_type} tunnel on port {local_port}")
-                    print(f"debug:    starting tcp tunnel, forwarding {public_url} -> localhost:{local_port}")
-                    
-                    # establish connection to local tcp service
-                    try:
-                        local_reader, local_writer = await asyncio.open_connection('127.0.0.1', local_port)
-                        print(f"debug:    connected to local tcp service on port {local_port}")
-                        add_network_event("connection", f"connected to local service on port {local_port}")
-                    except ConnectionRefusedError:
-                        print(f"error:    could not connect to local service on port {local_port}")
-                        add_network_event("error", f"local service on port {local_port} refused connection")
-                        live.update(make_layout("", "", f"local service on port {local_port} not available"))
-                        await asyncio.sleep(3)
-                        return
-                    
-                    # bidirectional tcp forwarding with proper lifecycle management
-                    async def forward_to_local():
-                        """forward data from websocket to local tcp service"""
-                        nonlocal bytes_in  # allow modification of outer scope variable
-                        try:
-                            while True:
-                                data = await websocket.recv()
-                                if isinstance(data, bytes):
-                                    print(f"debug:    forwarding {len(data)} bytes from websocket to local service")
-                                    add_network_event("request", f"TCP data ({len(data)}b)")
-                                    local_writer.write(data)
-                                    await local_writer.drain()
-                                    
-                                    # update stats
-                                    bytes_in += len(data)
-                                    live.update(make_layout("active", public_url))
-                                else:
-                                    print(f"debug:    received non-bytes data from websocket: {type(data)}")
-                        except websockets.exceptions.ConnectionClosed as e:
-                            print(f"debug:    websocket connection closed in forward_to_local: {e}")
-                            add_network_event("connection", "websocket closed (tunnel ended)")
-                            return "websocket_closed"
-                        except Exception as e:
-                            print(f"error:    unexpected error in forward_to_local: {e}")
-                            add_network_event("error", f"forward_to_local error: {e}")
-                            return "error"
-                        finally:
-                            print("debug:    cleaning up local writer connection")
-                            if not local_writer.is_closing():
-                                local_writer.close()
-                                try:
-                                    await local_writer.wait_closed()
-                                    print("debug:    local writer closed successfully")
-                                except Exception as e:
-                                    print(f"debug:    error closing local writer: {e}")
+                    add_network_event("tunnel", f"starting {tunnel_type} proxy for {public_url}")
 
-                    async def forward_to_websocket():
-                        """forward data from local tcp service to websocket"""
-                        nonlocal bytes_out  # allow modification of outer scope variable
+                    # store reader/writer pairs for each concurrent tcp connection
+                    tcp_sub_connections: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
+                    
+                    async def forward_local_to_ws(sub_id: str, reader: asyncio.StreamReader):
+                        """reads from a local tcp socket and forwards data to the node via websocket."""
+                        nonlocal bytes_out
+                        writer = None
                         try:
-                            while True:
-                                data = await local_reader.read(4096)
+                            # get the writer from the dict
+                            if sub_id in tcp_sub_connections:
+                                _, writer = tcp_sub_connections[sub_id]
+                            else: # should not happen
+                                return
+
+                            while not reader.at_eof():
+                                data = await reader.read(4096)
                                 if not data:
-                                    print("debug:    local tcp connection closed (no more data)")
-                                    add_network_event("connection", "local service closed connection")
-                                    return "local_closed"
-                                print(f"debug:    forwarding {len(data)} bytes from local service to websocket")
-                                add_network_event("response", f"TCP response ({len(data)}b)")
-                                await websocket.send(data)
+                                    break
+                                
+                                # frame the data with the sub_connection_id
+                                id_bytes = sub_id.encode('utf-8')
+                                id_len = len(id_bytes)
+                                frame = b'T' + id_len.to_bytes(1, 'big') + id_bytes + data
+                                await websocket.send(frame)
                                 
                                 # update stats
-                                bytes_out += len(data)
+                                bytes_out += len(frame)
                                 live.update(make_layout("active", public_url))
-                        except websockets.exceptions.ConnectionClosed as e:
-                            print(f"debug:    websocket connection closed in forward_to_websocket: {e}")
-                            add_network_event("connection", "websocket closed (tunnel ended)")
-                            return "websocket_closed"
-                        except Exception as e:
-                            print(f"error:    unexpected error in forward_to_websocket: {e}")
-                            add_network_event("error", f"forward_to_websocket error: {e}")
-                            return "error"
 
-                    # run both forwarding tasks concurrently with proper termination
-                    try:
-                        print("debug:    starting bidirectional tcp forwarding tasks")
-                        results = await asyncio.gather(
-                            forward_to_local(),
-                            forward_to_websocket(),
-                            return_exceptions=True
-                        )
-                        
-                        # check why the forwarding stopped
-                        print(f"debug:    tcp forwarding ended with results: {results}")
-                        
-                        # if either direction ended normally, close everything
-                        for result in results:
-                            if result in ["websocket_closed", "local_closed"]:
-                                print("debug:    tcp tunnel ended gracefully")
-                                break
-                        else:
-                            # if we got here, something unexpected happened
-                            print(f"debug:    tcp tunnel ended unexpectedly: {results}")
-                    
-                    finally:
-                        # cleanup local tcp connection
-                        print("debug:    cleaning up local tcp connection")
-                        if 'local_writer' in locals() and not local_writer.is_closing():
-                            local_writer.close()
+                        except (ConnectionResetError, asyncio.IncompleteReadError, BrokenPipeError):
+                            # connection closed by local application
+                            pass
+                        except Exception as e:
+                            add_network_event("error", f"local forwarder error ({sub_id}): {e}")
+                        finally:
+                            # clean up this sub-connection
+                            if sub_id in tcp_sub_connections:
+                                _, writer_to_close = tcp_sub_connections.pop(sub_id)
+                                if writer_to_close and not writer_to_close.is_closing():
+                                    writer_to_close.close()
+                                    await writer_to_close.wait_closed()
+                            
+                            # notify node that this sub-connection is closed
+                            id_bytes = sub_id.encode('utf-8')
+                            id_len = len(id_bytes)
+                            close_frame = b'C' + id_len.to_bytes(1, 'big') + id_bytes
                             try:
-                                await local_writer.wait_closed()
-                            except:
-                                pass
+                                await websocket.send(close_frame)
+                                add_network_event("connection", f"tcp stream ({sub_id}) closed")
+                            except websockets.exceptions.ConnectionClosed:
+                                pass # main connection is already dead
+
+                    # main loop to receive data from the node's websocket
+                    while True:
+                        message = await websocket.recv()
+                        if not isinstance(message, bytes):
+                            continue
+                        
+                        bytes_in += len(message)
+                        live.update(make_layout("active", public_url))
+
+                        # parse the frame from the node
+                        frame_type = message[0:1]
+                        
+                        if frame_type == b'T': # tcp data packet
+                            try:
+                                id_len = int.from_bytes(message[1:2], 'big')
+                                sub_id = message[2:2+id_len].decode('utf-8')
+                                payload = message[2+id_len:]
+                                
+                                if sub_id in tcp_sub_connections:
+                                    # existing connection, forward data to local service
+                                    _, writer = tcp_sub_connections[sub_id]
+                                    if not writer.is_closing():
+                                        writer.write(payload)
+                                        await writer.drain()
+                                else:
+                                    # new sub-connection request from node
+                                    try:
+                                        reader, writer = await asyncio.open_connection('127.0.0.1', local_port)
+                                        tcp_sub_connections[sub_id] = (reader, writer)
+                                        
+                                        # start a new task to handle forwarding from local -> ws
+                                        asyncio.create_task(forward_local_to_ws(sub_id, reader))
+                                        
+                                        # forward the initial packet to the new local connection
+                                        writer.write(payload)
+                                        await writer.drain()
+                                        add_network_event("connection", f"new tcp stream ({sub_id}) opened")
+                                        
+                                    except ConnectionRefusedError:
+                                        add_network_event("error", f"local port {local_port} refused connection")
+                                        # notify node to close this sub-connection
+                                        id_bytes = sub_id.encode('utf-8')
+                                        id_len = len(id_bytes)
+                                        close_frame = b'C' + id_len.to_bytes(1, 'big') + id_bytes
+                                        await websocket.send(close_frame)
+                            
+                            except (IndexError, UnicodeDecodeError):
+                                add_network_event("error", "could not parse node tcp frame")
+                                
+                        elif frame_type == b'C': # close command from node
+                            try:
+                                id_len = int.from_bytes(message[1:2], 'big')
+                                sub_id = message[2:2+id_len].decode('utf-8')
+                                if sub_id in tcp_sub_connections:
+                                    reader, writer = tcp_sub_connections.pop(sub_id)
+                                    if not writer.is_closing():
+                                        writer.close()
+                                        await writer.wait_closed()
+                                    add_network_event("connection", f"tcp stream ({sub_id}) closed by node")
+                            except (IndexError, UnicodeDecodeError):
+                                add_network_event("error", "could not parse node close frame")
 
         except requests.RequestException as e:
             error_msg = e.response.text if e.response else str(e)
