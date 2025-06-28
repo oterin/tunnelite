@@ -59,7 +59,7 @@ async def request_ssl_certificate_from_server(public_ip: str):
     print("info:     requesting ssl certificate generation from server...")
     
     node_secret_id = get_node_secret_id()
-    headers = {"x-node-secret-id": node_secret_id}
+    headers = {"x-api-key": node_secret_id}
     payload = {"public_ip": public_ip}
     
     try:
