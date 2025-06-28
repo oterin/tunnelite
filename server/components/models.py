@@ -45,7 +45,7 @@ class NodeInfoPublic(BaseModel):
 class Node(BaseModel):
     node_secret_id: str # the private identifier
     public_hostname: str | None = None # the public name
-    status: str
+    status: str = "pending"
     reported_location: str | None = None
     public_address: str | None = None
     verified_ip_address: str | None = None
@@ -53,7 +53,7 @@ class Node(BaseModel):
     verified_geolocation_verified_at: dict | None = None
     last_seen_at: float | None = None
     # registration fields
-    max_clients: int | None = None
+    max_clients: int | None = 20
     port_range: str | None = None
     bandwidth_down_mbps: float | None = None
     bandwidth_up_mbps: float | None = None
