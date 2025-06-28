@@ -131,7 +131,7 @@ def run_certbot(hostname: str, email: str):
 async def get_self_node_record():
     """Fetches the full details for this node from the main server."""
     print("info:     Fetching node record from main server...")
-    headers = {"x-api-key": get_node_secret_id()}
+    headers = {"x-node-secret-id": get_node_secret_id()}
     url = f"{MAIN_SERVER_URL}/nodes/me"
     try:
         response = requests.get(url, headers=headers, timeout=10)
