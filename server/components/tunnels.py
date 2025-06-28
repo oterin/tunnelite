@@ -171,3 +171,120 @@ def find_best_node(tunnel_type: str, preferred_country: str, ping_data: Optional
         status_code=503,
         detail="the entire fucking global infrastructure is at capacity. please wait, or consider contributing a node so this won't happen again?"
     )
+
+@router.post("", response_model=Tunnel, status_code=status.HTTP_201_CREATED)
+@limiter.limit("20/hour")
+async def create_tunnel(
+    request: Request,
+    tunnel_request: TunnelCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    username = current_user.get("username")
+
+    # 1. find the best node for the user
+    preferred_country = get_country_code_from_ip(request.client.host) # type: ignore
+    result  = find_best_node(tunnel_request.tunnel_type, preferred_country, tunnel_request.ping_data)
+
+    if not result:
+        raise HTTPException(
+            status_code=503,
+            detail="the entire fucking global infrastructure is at capacity. please wait, or consider contributing a node so this won't happen again?"
+        )
+
+    best_node, allocated_port = result
+    node_hostname = best_node.get("public_hostname")
+    if not node_hostname:
+        raise HTTPException(
+            status_code=503,
+            detail="selected node has no public hostname"
+        )
+
+    # 2. generate a public url
+    public_url = ""
+    if tunnel_request.tunnel_type in ["http", "https"]:
+        user_subdomain = f"{secrets.token_hex(4)}-{secrets.token_hex(2)}"
+        public_url = f"http://{user_subdomain}.{node_hostname}"
+    elif tunnel_request.tunnel_type in ["tcp", "udp"]:
+        public_url = f"{tunnel_request.tunnel_type}://{node_hostname}:{allocated_port}"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid tunnel type"
+        )
+
+    # 3. create new tunnel and save the record
+    new_tunnel_data = {
+        "tunnel_id": secrets.token_hex(16),
+        "owner_username": username,
+        "tunnel_type": tunnel_request.tunnel_type,
+        "local_port": tunnel_request.local_port,
+        "public_url": public_url,
+        "status": "pending",
+        "created_at": time.time(),
+        "node_secret_id": best_node["node_secret_id"], # internal link to the node
+        "node_public_hostname": best_node["public_hostname"] # --- ADD THIS LINE ---
+    }
+    database.save_tunnel(new_tunnel_data)
+
+    # construct the public-facing response model, ensuring no secret ids are exposed
+    response_tunnel = new_tunnel_data.copy()
+    response_tunnel["public_hostname"] = node_hostname
+    del response_tunnel["node_secret_id"]
+
+    return response_tunnel
+
+@router.get("", response_model=List[Tunnel])
+async def list_user_tunnels(current_user: dict = Depends(get_current_user)):
+    username = current_user.get("username")
+    if not username:
+        raise HTTPException(status_code=403, detail="could not validate user.")
+
+    # create a map of node secret ids to public hostnames for efficient lookup
+    nodes_map = {
+        node["node_secret_id"]: node.get("public_hostname")
+        for node in database.get_all_nodes()
+    }
+
+    user_tunnels_data = database.get_tunnels_by_username(username)
+
+    # build the response, adding public_hostname and ensuring no secrets are leaked
+    response_tunnels = []
+    for tunnel in user_tunnels_data:
+        response_tunnel = tunnel.copy()
+        node_secret_id = response_tunnel.pop("node_secret_id", None)
+        # Use the stored node_public_hostname if available, otherwise fall back to lookup
+        response_tunnel["public_hostname"] = response_tunnel.get("node_public_hostname", nodes_map.get(node_secret_id, "unknown-node"))
+        response_tunnels.append(response_tunnel)
+
+    return response_tunnels
+
+@router.delete("/{tunnel_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_tunnel(
+    tunnel_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    # allows a user to delete their own tunnel
+    tunnel = database.get_tunnel_by_id(tunnel_id)
+    if not tunnel:
+        # if the tunnel doesn't exist, it's effectively deleted
+        return
+
+    if tunnel.get("owner_username") != current_user.get("username"):
+        # users can only delete their own tunnels
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to delete this tunnel."
+        )
+
+    database.update_tunnel_status(tunnel_id, "deleted_by_user")
+
+    # notify the node to tear down the tunnel in real-time
+    teardown_message = {
+        "type": "teardown_tunnel",
+        "tunnel_id": tunnel_id,
+    }
+    await node_manager.send_message_to_node(
+        tunnel.get("node_secret_id"), teardown_message
+    )
+
+    return
