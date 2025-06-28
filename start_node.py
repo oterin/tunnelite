@@ -149,14 +149,20 @@ async def main_startup_flow():
         return
 
     hostname = node_record.get("public_hostname")
-    port_range = node_record.get("port_range", [])
+    port_range_str = node_record.get("port_range", "")
     
-    if not all([hostname, port_range]):
+    if not all([hostname, port_range_str]):
         print("critical: node record is missing hostname or port_range. exiting.")
+        return
+    
+    # parse the port range string into a list of ports
+    port_list = parse_port_range(port_range_str)
+    if not port_list:
+        print("critical: could not parse port range. exiting.")
         return
         
     # we will use the first port in the assigned range for the main server
-    main_server_port = port_range[0]
+    main_server_port = port_list[0]
 
     # 2. determine public ip
     public_ip = await get_public_ip()
