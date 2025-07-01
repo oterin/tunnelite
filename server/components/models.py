@@ -1,7 +1,8 @@
 from os import sep
 import time
 from pydantic import BaseModel, Field
-from typing import Optional, Enum
+from enum import Enum
+from typing import Optional
 from requests.models import stream_decode_response_unicode
 from datetime import datetime
 
@@ -120,3 +121,7 @@ class BanCheck(BaseModel):
     reason: Optional[str] = None
     expires_at: Optional[datetime] = None
     banned_by: Optional[str] = None
+
+# --- enums ---
+class TunnelType(str, Enum):
+    # ... existing code ...

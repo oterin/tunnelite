@@ -106,26 +106,11 @@ async def heartbeat_task():
             
             print(f"info:     ({time.ctime()}) sending heartbeat with {tunnel_metrics['total_active_tunnels']} active tunnels...")
             
-            # try jwt heartbeat first if we have a cert
-            if node_cert:
-                try:
-                    response = requests.post(
-                        f"{config.MAIN_SERVER_URL}/nodes/heartbeat",
-                        json=node_details,
-                        headers={"x-node-cert": node_cert}
-                    )
-                except requests.RequestException:
-                    # fallback to old register endpoint
-                    response = requests.post(
-                        f"{config.MAIN_SERVER_URL}/nodes/register",
-                        json=node_details
-                    )
-            else:
-                # no cert, use old endpoint
-                response = requests.post(
-                    f"{config.MAIN_SERVER_URL}/nodes/register",
-                    json=node_details
-                )
+            # always use the register endpoint for heartbeats to avoid jwt issues
+            response = requests.post(
+                f"{config.MAIN_SERVER_URL}/nodes/register",
+                json=node_details
+            )
                 
             response.raise_for_status()
 

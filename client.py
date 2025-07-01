@@ -25,6 +25,8 @@ from rich import box
 from rich.columns import Columns
 from rich.align import Align
 
+import certifi
+
 # --- configuration ---
 # we'll store the api key in the user's home directory for persistence.
 home_dir = os.path.expanduser("~")
@@ -132,7 +134,7 @@ async def ping_all_nodes(api_key: str) -> Dict[str, float]:
     """ping all available nodes and return latency data"""
     headers = {"x-api-key": api_key}
     try:
-        response = requests.get(f"{main_server_url}/nodes/available", headers=headers)
+        response = requests.get(f"{main_server_url}/nodes/available", headers=headers, verify=certifi.where())
         response.raise_for_status()
         nodes = response.json()
         
@@ -248,638 +250,577 @@ async def handle_http_request(local_port: int, request_data: bytes) -> bytes:
 
 # --- main tunnel coroutine ---
 async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
-    """run tunnel with beautiful centered tui"""
-    headers = {"x-api-key": api_key}
-
-    # stats tracking
-    request_count = 0
-    bytes_in = 0
-    bytes_out = 0
-    start_time = None
-    request_log = []
+    """the main coroutine that establishes and maintains a tunnel connection."""
+    
+    sub_connections = {} # tracks tcp sub-connections for a single tcp tunnel
     
     def format_bytes(bytes_val):
-        """format bytes in human readable format"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
-            if bytes_val < 1024.0:
-                return f"{bytes_val:.1f}{unit}"
-            bytes_val /= 1024.0
-        return f"{bytes_val:.1f}TB"
+        if bytes_val < 1024:
+            return f"{bytes_val} b"
+        elif bytes_val < 1024**2:
+            return f"{bytes_val/1024:.1f} kb"
+        else:
+            return f"{bytes_val/1024**2:.1f} mb"
 
-    def make_layout(status: str, public_url: str = "", error: str = ""):
-        """create beautiful centered layout"""
+    def make_layout(status: str, public_url: str = "", error: str = "", bytes_in: int = 0, bytes_out: int = 0) -> Layout:
+        """create the live layout for the tunnel ui."""
         layout = Layout()
         
-        # main container with padding
-        layout.split_column(
-            Layout(name="header", size=7),
-            Layout(name="main", ratio=1),
-            Layout(name="footer", size=3)
-        )
+        # header
+        header_text = Text()
+        header_text.append("tunnelite", style="bold")
+        header_text.append(" / ", style="dim")
+        header_text.append(f"{tunnel_type} tunnel", style="dim")
         
-        # header section
+        # status display
+        if status == "active":
+            status_text = Text(f"● active", style="green")
+        elif status == "error":
+            status_text = Text(f"✗ error", style="red")
+        elif status == "disconnected":
+            status_text = Text(f"○ disconnected", style="yellow")
+        else:
+            status_text = Text(f"○ {status}", style="dim")
+
+        header_cols = Columns([
+            Align.left(header_text),
+            Align.right(status_text)
+        ])
+        
+        layout.split(
+            Layout(name="header", size=3),
+            Layout(ratio=1, name="main"),
+            Layout(size=3, name="footer")
+        )
+
+        # main section
+        main_panel_content = []
+        if public_url:
+            main_panel_content.append(Text(f"     public: {public_url}", justify="left"))
+        main_panel_content.append(Text(f"      local: 127.0.0.1:{local_port}", justify="left", style="dim"))
+        
         if error:
-            header_content = Panel(
-                Align.center(f"[bold]● error[/bold]\n[dim]{error}[/dim]"),
-                box=box.SIMPLE,
-                style="dim"
+            main_panel_content.append(Text())
+            main_panel_content.append(Text(error, style="red", justify="left"))
+
+        layout["main"].update(
+            Align.center(
+                Panel(
+                    Layout(main_panel_content),
+                    title="tunnel details",
+                    border_style="dim",
+                    width=60,
+                    height=8
+                )
             )
-        elif status == "active":
-            uptime = time.time() - start_time if start_time else 0
-            uptime_str = f"{int(uptime//3600):02d}:{int((uptime%3600)//60):02d}:{int(uptime%60):02d}"
-            
-            stats_items = [
-                f"[bold]tunnelite[/bold]",
-                f"{tunnel_type.upper()}",
-                f":{local_port}",
-                f"{uptime_str}"
-            ]
-            if tunnel_type in ["http", "https"]:
-                stats_items.append(f"{request_count} reqs")
-            
-            stats_items.extend([
-                f"↓{format_bytes(bytes_in)}",
-                f"↑{format_bytes(bytes_out)}"
-            ])
-            stats_text = " [dim]│[/dim] ".join(stats_items)
-            
-            header_content = Panel(
-                Align.center(stats_text),
-                box=box.SIMPLE,
-                style="bold"
-            )
-        else:
-            status_text = {
-                "creating": "creating tunnel",
-                "pinging nodes": "testing node latency",
-                "connecting": "connecting to node"
-            }.get(status, status)
-            
-            header_content = Panel(
-                Align.center(f"[bold]● {status_text}[/bold]"),
-                box=box.SIMPLE,
-                style="dim"
-            )
-        
-        layout["header"].update(header_content)
-         
-        # main content area - just center and right columns
-        layout["main"].split_row(
-            Layout(name="center", ratio=3),
-            Layout(name="right", ratio=2)
         )
         
-        # center column with tunnel info
-        if status == "active" and public_url:
-            tunnel_info = Panel(
-                Align.center(
-                    f"[bold]tunnel active[/bold]\n\n"
-                    f"[dim]public url:[/dim]\n{public_url}\n\n"
-                    f"[dim]forwarding:[/dim]\n{public_url} → localhost:{local_port}\n\n"
-                    f"[dim]requests:[/dim] {request_count}\n"
-                    f"[dim]data in:[/dim] {format_bytes(bytes_in)}\n"
-                    f"[dim]data out:[/dim] {format_bytes(bytes_out)}"
-                ),
-                title="status",
-                box=box.SIMPLE
-            )
-        elif error:
-            tunnel_info = Panel(
-                Align.center(f"[dim]{error}[/dim]"),
-                title="error",
-                box=box.SIMPLE
-            )
-        elif public_url:
-            tunnel_info = Panel(
-                Align.center(f"[dim]connecting to[/dim]\n{public_url}"),
-                title="status",
-                box=box.SIMPLE
-            )
-        else:
-            tunnel_info = Panel(
-                Align.center(f"[dim]{status}...[/dim]"),
-                title="status",
-                box=box.SIMPLE
-            )
+        # footer (network activity)
+        bytes_in_str = format_bytes(bytes_in)
+        bytes_out_str = format_bytes(bytes_out)
         
-        layout["center"].update(tunnel_info)
+        footer_text = Text()
+        footer_text.append(f"in: {bytes_in_str}", style="dim")
+        footer_text.append(" / ", style="dim")
+        footer_text.append(f"out: {bytes_out_str}", style="dim")
         
-        # activity log in right column (smaller)
-        combined_log = []
+        footer_cols = Columns([
+            Align.left(Text(f"[dim]network log (last {max_network_events} events)")),
+            Align.right(footer_text)
+        ])
         
-        # add recent network events
-        recent_network_events = network_events[-6:] if network_events else []
-        for event in recent_network_events:
-            combined_log.append(format_network_event(event))
-        
-        # add recent requests
-        if request_log:
-            combined_log.extend(request_log[-4:])
-        
-        if not combined_log:
-            log_content = "[dim]waiting for activity...[/dim]"
-        else:
-            log_content = "\n".join(combined_log)
-        
-        activity_panel = Panel(
-            log_content,
-            title="activity",
-            box=box.SIMPLE,
-            style="dim"
+        # network event log
+        event_log = Layout(
+            [Layout(Text(format_network_event(e))) for e in network_events[-5:]]
         )
-        layout["right"].update(activity_panel)
         
-        # footer
-        footer_content = Panel(
-            Align.center("[dim]press [bold]ctrl+c[/bold] to stop[/dim]"),
-            box=box.SIMPLE,
-            style="dim"
+        footer_layout = Layout()
+        footer_layout.split_column(
+            Layout(footer_cols, name="footer_header"),
+            Layout(event_log, name="event_log")
         )
-        layout["footer"].update(footer_content)
+
+        layout["footer"].update(
+             Align.center(
+                Panel(
+                    footer_layout,
+                    title="activity",
+                    border_style="dim",
+                    width=60,
+                    height=10
+                )
+            )
+        )
         
+        # spinner for non-active states
+        if status not in ["active", "error", "disconnected"]:
+            layout["header"].update(
+                 Columns([
+                    Align.left(Spinner("dots", text=header_text)),
+                    Align.right(status_text)
+                ])
+            )
+
         return layout
-
+    
     def log_request(method: str, path: str, status_code: int, size: int, direction: str):
-        """add request to log"""
-        timestamp = time.strftime("%H:%M:%S")
+        """helper to log http request/response events"""
+        if direction == "in":
+            icon = "→"
+            color = "blue"
+        else:
+            icon = "←"
+            color = "green" if status_code < 400 else "red"
         
-        # simple monochrome formatting
-        status_icon = "✓" if status_code < 400 else "✗"
-        arrow = "→" if direction == "out" else "←"
-        
-        log_entry = f"[dim]{timestamp}[/dim] {arrow} {status_icon} {method} {path}"
-        request_log.append(log_entry)
-        
-        # keep log size manageable
-        if len(request_log) > 20:
-            request_log.pop(0)
+        msg = f"[{color}]{method} {path} - {status_code}[/{color}]"
+        add_network_event("response", msg, {"status_code": status_code})
 
-    with Live(make_layout("creating"), refresh_per_second=4) as live:
+    with Live(make_layout("initializing..."), screen=True, auto_refresh=False) as live:
         try:
-            # 1. ping all nodes to get latency data
-            live.update(make_layout("pinging nodes"))
-            add_network_event("tunnel", "pinging nodes for optimal selection")
-            ping_data = await ping_all_nodes(api_key)
-            
-            # 2. create tunnel with ping data
-            live.update(make_layout("creating"))
-            add_network_event("tunnel", f"creating {tunnel_type} tunnel on port {local_port}")
-            create_payload = {
-                "tunnel_type": tunnel_type, 
+            # 1. create the tunnel on the server
+            live.update(make_layout("requesting tunnel..."), refresh=True)
+            headers = {"x-api-key": api_key}
+            payload = {
+                "tunnel_type": tunnel_type,
                 "local_port": local_port,
-                "ping_data": ping_data
             }
-            res = requests.post(f"{main_server_url}/tunnels", headers=headers, json=create_payload)
-            res.raise_for_status()
-            tunnel = res.json()
-            add_network_event("tunnel", f"tunnel created: {tunnel['public_url']}")
+            response = requests.post(f"{main_server_url}/tunnels", json=payload, headers=headers, verify=certifi.where())
 
-            tunnel_id = tunnel["tunnel_id"]
-            public_url = tunnel["public_url"]
-            public_hostname = tunnel["public_hostname"]
+            if response.status_code == 401:
+                live.update(make_layout("error", error="authentication failed. please check your api key."), refresh=True)
+                return
 
-            # 3. get node details for the server-selected node
-            live.update(make_layout("connecting", public_url))
-            node_res = requests.get(f"{main_server_url}/nodes/available", headers=headers)
-            node_res.raise_for_status()
-            target_node = next((n for n in node_res.json() if n["public_hostname"] == public_hostname), None)
-            
-            if not target_node:
-                live.update(make_layout("", "", f"could not find assigned node '{public_hostname}'"))
-                await asyncio.sleep(3)
+            if response.status_code != 200:
+                error_detail = "unknown error"
+                try:
+                    error_detail = response.json().get("detail", "unknown error")
+                except:
+                    pass
+                live.update(make_layout("error", error=f"failed to create tunnel: {error_detail}"), refresh=True)
                 return
             
-            # use the hostname for the connection, not the ip, for proper ssl verification.
-            hostname_for_ws = target_node["public_hostname"]
-            port_for_ws = urlparse(target_node["public_address"]).port
+            tunnel_data = response.json()
+            tunnel_id = tunnel_data.get("id")
+            public_url = tunnel_data.get("public_url")
+            node_ws_url = tunnel_data.get("node_ws_url")
             
-            node_ws_url = f"wss://{hostname_for_ws}:{port_for_ws}"
-            connect_uri = f"{node_ws_url}/ws/connect"
+            if not all([tunnel_id, public_url, node_ws_url]):
+                live.update(make_layout("error", error="server response missing required tunnel information."), refresh=True)
+                return
 
-            # 4. connect and run tunnel
-            add_network_event("connection", f"connecting to {hostname_for_ws}")
-            async with websockets.connect(connect_uri) as websocket:
-                add_network_event("connection", "websocket connected")
-                await websocket.send(json.dumps({"type": "activate", "tunnel_id": tunnel_id, "api_key": api_key}))
+            # 2. connect to the assigned tunnel node via websocket
+            live.update(make_layout("connecting...", public_url=public_url), refresh=True)
+            
+            ws_url = f"{node_ws_url}/ws/connect"
+            
+            try:
+                # establish the websocket connection
+                websocket = await websockets.connect(ws_url, ssl=True)
 
-                activation_response_str = await websocket.recv()
-                activation_response = json.loads(activation_response_str)
-                if activation_response.get("status") != "success":
-                    add_network_event("error", f"activation failed: {activation_response}")
-                    live.update(make_layout("", "", f"activation failed: {activation_response}"))
-                    await asyncio.sleep(3)
+                # activation handshake
+                activation_message = {
+                    "type": "activate",
+                    "tunnel_id": tunnel_id,
+                    "api_key": api_key
+                }
+                await websocket.send(json.dumps(activation_message))
+                
+                # wait for confirmation
+                response_str = await websocket.recv()
+                response_json = json.loads(response_str)
+
+                if response_json.get("status") != "success":
+                    error_msg = response_json.get("message", "tunnel activation failed")
+                    live.update(make_layout("error", public_url=public_url, error=error_msg), refresh=True)
+                    await websocket.close()
                     return
 
-                add_network_event("tunnel", "tunnel activated successfully")
-                live.update(make_layout("active", public_url))
-                start_time = time.time()
+            except (websockets.exceptions.ConnectionClosed, websockets.exceptions.InvalidHandshake) as e:
+                live.update(make_layout("error", public_url=public_url, error=f"websocket connection failed: {e}"), refresh=True)
+                return
+            except Exception as e:
+                live.update(make_layout("error", public_url=public_url, error=f"an unexpected error occurred: {e}"), refresh=True)
+                return
+            
+            live.update(make_layout("active", public_url=public_url), refresh=True)
+            add_network_event("tunnel", "tunnel active", {"url": public_url})
 
-                # proxy loop with live updates and request logging
-                if tunnel_type in ["http", "https"]:
+            bytes_in = 0
+            bytes_out = 0
+            
+            # --- nested functions for bidirectional forwarding ---
+
+            async def forward_local_to_ws(sub_id: str, reader: asyncio.StreamReader):
+                nonlocal bytes_out
+                try:
                     while True:
-                        try:
-                            request_from_node = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                        except asyncio.TimeoutError:
-                            live.update(make_layout("active", public_url))
-                            continue
+                        data = await reader.read(4096)
+                        if not data:
+                            await websocket.send(json.dumps({"type": "close_stream", "sub_id": sub_id}))
+                            break
+                        
+                        bytes_out += len(data)
+                        
+                        # simple framing: [sub_id_len (1 byte)][sub_id][data]
+                        sub_id_bytes = sub_id.encode('utf-8')
+                        header = bytes([len(sub_id_bytes)]) + sub_id_bytes
+                        await websocket.send(header + data)
+                        
+                        live.update(make_layout(
+                            "active", 
+                            public_url=public_url,
+                            bytes_in=bytes_in,
+                            bytes_out=bytes_out
+                        ), refresh=True)
+                except (ConnectionResetError, BrokenPipeError):
+                    # local connection closed by client
+                    pass
+                except Exception as e:
+                    add_network_event("error", f"local->ws error: {e}", {"sub_id": sub_id})
+                finally:
+                    # ensure stream is closed on this side
+                    await websocket.send(json.dumps({"type": "close_stream", "sub_id": sub_id}))
 
-                        request_data_bytes = request_from_node if isinstance(request_from_node, bytes) else request_from_node.encode('utf-8')
-                        
-                        # parse request for logging
-                        try:
-                            request_str = request_data_bytes.decode('utf-8')
-                            lines = request_str.split('\n')
-                            if lines:
-                                method, path = lines[0].split()[:2]
-                        except:
-                            method, path = "?", "/"
-                        
-                        # log incoming request
-                        add_network_event("request", f"{method} {path}", {"method": method, "path": path})
-                        
-                        response_to_node = await handle_http_request(local_port, request_data_bytes)
-                        
-                        # parse response status for logging
-                        try:
-                            response_str = response_to_node.decode('utf-8')
-                            status_line = response_str.split('\n')[0]
-                            status_code = int(status_line.split()[1])
-                        except:
-                            status_code = 200
-                        
-                        # log outgoing response
-                        add_network_event("response", f"HTTP {status_code}", {"status_code": status_code})
-                        
-                        await websocket.send(response_to_node)
-                        
-                        # update stats and log
-                        request_count += 1
-                        bytes_in += len(request_data_bytes)
-                        bytes_out += len(response_to_node)
-                        
-                        log_request(method, path, status_code, len(response_to_node), "out")
-                        live.update(make_layout("active", public_url))
-                        
-                elif tunnel_type in ["tcp", "udp"]:
-                    add_network_event("tunnel", f"starting {tunnel_type} proxy for {public_url}")
 
-                    # store reader/writer pairs for each concurrent tcp connection
-                    tcp_sub_connections: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
+            async def forward_ws_to_local_tcp(sub_id: str, writer: asyncio.StreamWriter):
+                nonlocal bytes_in
+                # this task is managed by the main ws receiver loop
+                # it just needs to write data to the local socket
+                # and handle closing the writer when done.
+                try:
+                    while True:
+                        # this is a placeholder; the actual data receiving
+                        # is handled by the main while loop below.
+                        # we use an event to signal data arrival.
+                        data_event = sub_connection_events.get(sub_id)
+                        if not data_event:
+                            break # connection closed
+                        
+                        data = await data_event.get()
+                        if data is None: # None is the signal to close
+                            break
+
+                        writer.write(data)
+                        await writer.drain()
+                        bytes_in += len(data)
+                        
+                        live.update(make_layout(
+                            "active", 
+                            public_url=public_url,
+                            bytes_in=bytes_in,
+                            bytes_out=bytes_out
+                        ), refresh=True)
+                
+                except (ConnectionResetError, BrokenPipeError):
+                    # remote connection closed
+                    pass
+                except Exception as e:
+                     add_network_event("error", f"ws->local error: {e}", {"sub_id": sub_id})
+                finally:
+                    if not writer.is_closing():
+                        writer.close()
+                        await writer.wait_closed()
+
+
+            # main websocket receive loop
+            try:
+                while True:
+                    message = await websocket.recv()
                     
-                    async def forward_local_to_ws(sub_id: str, reader: asyncio.StreamReader):
-                        """reads from a local tcp socket and forwards data to the node via websocket."""
-                        nonlocal bytes_out
-                        writer = None
+                    if isinstance(message, str):
+                        # handle control messages (json)
                         try:
-                            # get the writer from the dict
-                            if sub_id in tcp_sub_connections:
-                                _, writer = tcp_sub_connections[sub_id]
-                            else: # should not happen
-                                return
-
-                            while not reader.at_eof():
-                                data = await reader.read(4096)
-                                if not data:
-                                    break
-                                
-                                # frame the data with the sub_connection_id
-                                id_bytes = sub_id.encode('utf-8')
-                                id_len = len(id_bytes)
-                                frame = b'T' + id_len.to_bytes(1, 'big') + id_bytes + data
-                                await websocket.send(frame)
-                                
-                                # update stats
-                                bytes_out += len(frame)
-                                live.update(make_layout("active", public_url))
-
-                        except (ConnectionResetError, asyncio.IncompleteReadError, BrokenPipeError):
-                            # connection closed by local application
-                            pass
-                        except Exception as e:
-                            add_network_event("error", f"local forwarder error ({sub_id}): {e}")
-                        finally:
-                            # clean up this sub-connection
-                            if sub_id in tcp_sub_connections:
-                                _, writer_to_close = tcp_sub_connections.pop(sub_id)
-                                if writer_to_close and not writer_to_close.is_closing():
-                                    writer_to_close.close()
-                                    await writer_to_close.wait_closed()
+                            msg_json = json.loads(message)
+                            if msg_json.get("type") == "error":
+                                add_network_event("error", msg_json.get("message", "unknown error from node"))
                             
-                            # notify node that this sub-connection is closed
-                            id_bytes = sub_id.encode('utf-8')
-                            id_len = len(id_bytes)
-                            close_frame = b'C' + id_len.to_bytes(1, 'big') + id_bytes
-                            try:
-                                await websocket.send(close_frame)
-                                add_network_event("connection", f"tcp stream ({sub_id}) closed")
-                            except websockets.exceptions.ConnectionClosed:
-                                pass # main connection is already dead
-
-                    # main loop to receive data from the node's websocket
-                    while True:
-                        try:
-                            message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                        except asyncio.TimeoutError:
-                            live.update(make_layout("active", public_url))
-                            continue
-
-                        if not isinstance(message, bytes):
-                            continue
-                        
-                        bytes_in += len(message)
-                        live.update(make_layout("active", public_url))
-
-                        # parse the frame from the node
-                        frame_type = message[0:1]
-                        
-                        if frame_type == b'T': # tcp data packet
-                            try:
-                                id_len = int.from_bytes(message[1:2], 'big')
-                                sub_id = message[2:2+id_len].decode('utf-8')
-                                payload = message[2+id_len:]
-                                
-                                if sub_id in tcp_sub_connections:
-                                    # existing connection, forward data to local service
-                                    _, writer = tcp_sub_connections[sub_id]
-                                    if not writer.is_closing():
-                                        writer.write(payload)
-                                        await writer.drain()
-                                else:
-                                    # new sub-connection request from node
-                                    try:
-                                        reader, writer = await asyncio.open_connection('127.0.0.1', local_port)
-                                        tcp_sub_connections[sub_id] = (reader, writer)
-                                        
-                                        # start a new task to handle forwarding from local -> ws
-                                        asyncio.create_task(forward_local_to_ws(sub_id, reader))
-                                        
-                                        # forward the initial packet to the new local connection
-                                        writer.write(payload)
-                                        await writer.drain()
-                                        add_network_event("connection", f"new tcp stream ({sub_id}) opened")
-                                        
-                                    except ConnectionRefusedError:
-                                        add_network_event("error", f"local port {local_port} refused connection")
-                                        # notify node to close this sub-connection
-                                        id_bytes = sub_id.encode('utf-8')
-                                        id_len = len(id_bytes)
-                                        close_frame = b'C' + id_len.to_bytes(1, 'big') + id_bytes
-                                        await websocket.send(close_frame)
-                            
-                            except (IndexError, UnicodeDecodeError):
-                                add_network_event("error", "could not parse node tcp frame")
-                                
-                        elif frame_type == b'C': # close command from node
-                            try:
-                                id_len = int.from_bytes(message[1:2], 'big')
-                                sub_id = message[2:2+id_len].decode('utf-8')
-                                if sub_id in tcp_sub_connections:
-                                    reader, writer = tcp_sub_connections.pop(sub_id)
-                                    if not writer.is_closing():
+                            # if we get a close stream message for a sub-connection, terminate it
+                            if msg_json.get("type") == "close_stream":
+                                sub_id_to_close = msg_json.get("sub_id")
+                                if sub_id_to_close in sub_connections:
+                                    writer, _, event = sub_connections.pop(sub_id_to_close, (None, None, None))
+                                    if writer and not writer.is_closing():
                                         writer.close()
-                                        await writer.wait_closed()
-                                    add_network_event("connection", f"tcp stream ({sub_id}) closed by node")
-                            except (IndexError, UnicodeDecodeError):
-                                add_network_event("error", "could not parse node close frame")
+                                    if event:
+                                        event.put_nowait(None) # signal closure
+                                        
+                        except json.JSONDecodeError:
+                            add_network_event("error", "received non-json text message")
+
+                    elif isinstance(message, bytes):
+                        # handle data messages (binary)
+                        header_len = 1
+                        sub_id_len = message[0]
+                        sub_id = message[header_len : header_len + sub_id_len].decode('utf-8')
+                        data = message[header_len + sub_id_len:]
+
+                        if sub_id not in sub_connections:
+                            # new sub-connection
+                            try:
+                                reader, writer = await asyncio.open_connection('127.0.0.1', local_port)
+                                data_event = asyncio.Queue()
+                                
+                                # create a task to forward from local to websocket
+                                fwd_local_task = asyncio.create_task(forward_local_to_ws(sub_id, reader))
+                                # create a task to forward from websocket to local
+                                fwd_ws_task = asyncio.create_task(forward_ws_to_local_tcp(sub_id, writer))
+                                
+                                sub_connections[sub_id] = (writer, fwd_local_task, data_event)
+                                
+                                # put the first chunk of data into the queue
+                                await data_event.put(data)
+                                
+                            except ConnectionRefusedError:
+                                # failed to connect to local service
+                                await websocket.send(json.dumps({
+                                    "type": "error", 
+                                    "sub_id": sub_id,
+                                    "message": f"connection to 127.0.0.1:{local_port} refused"
+                                }))
+                                await websocket.send(json.dumps({"type": "close_stream", "sub_id": sub_id}))
+                            except Exception as e:
+                                await websocket.send(json.dumps({
+                                    "type": "error", 
+                                    "sub_id": sub_id,
+                                    "message": f"failed to establish local connection: {e}"
+                                }))
+                                await websocket.send(json.dumps({"type": "close_stream", "sub_id": sub_id}))
+                        
+                        else:
+                            # existing sub-connection, just queue the data
+                            _, _, data_event = sub_connections[sub_id]
+                            await data_event.put(data)
+
+
+            except websockets.exceptions.ConnectionClosed:
+                live.update(make_layout("disconnected", public_url=public_url), refresh=True)
+            finally:
+                # cleanup all sub-connections
+                for sub_id, (writer, task, event) in sub_connections.items():
+                    if task:
+                        task.cancel()
+                    if writer and not writer.is_closing():
+                        writer.close()
+                    if event:
+                        event.put_nowait(None) # signal closure
+
+                if 'websocket' in locals() and not websocket.closed:
+                    await websocket.close()
 
         except requests.RequestException as e:
-            error_msg = e.response.text if e.response else str(e)
-            add_network_event("error", f"api error: {error_msg}")
-            live.update(make_layout("", "", f"api error: {error_msg}"))
-            await asyncio.sleep(3)
-        except (ConnectionRefusedError, websockets.exceptions.InvalidURI):
-            add_network_event("error", f"could not connect to node at {connect_uri}")
-            live.update(make_layout("", "", f"could not connect to node at {connect_uri}"))
-            await asyncio.sleep(3)
-        except websockets.exceptions.ConnectionClosed as e:
-            add_network_event("connection", f"connection closed: {e.reason} (code: {e.code})")
-            live.update(make_layout("", "", f"connection closed: {e.reason} (code: {e.code})"))
-            await asyncio.sleep(3)
-        except Exception as e:
-            # catch any unexpected crashes
-            print(f"error:    unexpected tunnel crash: {e}")
-            add_network_event("error", f"tunnel crashed: {e}")
-            live.update(make_layout("", "", f"tunnel crashed: {e}"))
-            await asyncio.sleep(3)
+            live.update(make_layout("error", error=f"api request failed: {e}"), refresh=True)
+        except KeyboardInterrupt:
+            console.print("\n[bold yellow] a b o r t e d .[/bold yellow]")
+        finally:
+            # ensure we attempt to close the websocket connection on exit
+            if 'websocket' in locals() and not websocket.closed:
+                await websocket.close()
+            
+            # ensure all sub-connection tasks are cancelled
+            for sub_id, (writer, task, event) in sub_connections.items():
+                if task:
+                    task.cancel()
+                if writer and not writer.is_closing():
+                    writer.close()
+                if event:
+                    event.put_nowait(None)
 
-# --- tui functions ---
+
 def register_user():
-    """interactive user registration with centered layout"""
+    """interactive prompt to register a new user."""
     clear_screen()
     show_header()
-    
-    console.print(Align.center("[bold]create new account[/bold]"))
+    console.print(Align.center("create a new account"), style="bold")
     console.print()
     
-    # centered input prompts
-    username = Prompt.ask("  username", console=console)
-    password = Prompt.ask("  password", password=True, console=console)
+    email = Prompt.ask(" enter your email")
     
-    console.print()
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-        console=console
-    ) as progress:
-        task = progress.add_task("  creating account...", total=None)
+    try:
+        payload = {"email": email}
+        response = requests.post(f"{main_server_url}/users/register", json=payload, verify=certifi.where())
         
-        try:
-            res = requests.post(
-                f"{main_server_url}/auth/register",
-                json={"username": username, "password": password}
-            )
-            res.raise_for_status()
-            progress.stop_task(task)
-            console.print(Align.center("✓ account created successfully"))
-            console.print(Align.center("[dim]you can now login with your credentials[/dim]"))
+        if response.status_code == 200:
+            console.print(" registration successful! please check your email for your api key.", style="green")
+            console.print(" once you have your key, use the [bold]login[/bold] command.", style="dim")
+        elif response.status_code == 409:
+            console.print(" an account with this email already exists.", style="yellow")
+        else:
+            error_detail = response.json().get("detail", "an unknown error occurred")
+            console.print(f" registration failed: {error_detail}", style="red")
             
-        except requests.RequestException as e:
-            progress.stop_task(task)
-            error_msg = e.response.text if e.response else str(e)
-            console.print(Align.center(f"✗ registration failed: {error_msg}"))
+    except requests.RequestException as e:
+        console.print(f" error connecting to server: {e}", style="red")
     
     console.print()
-    input(Align.center("press enter to continue...").plain)
+    Prompt.ask("press enter to return to the main menu...")
+
 
 def login_user():
-    """interactive user login with centered layout"""
+    """interactive prompt to log in with an api key."""
     clear_screen()
     show_header()
-    
-    console.print(Align.center("[bold]login to tunnelite[/bold]"))
+    console.print(Align.center("log in with your api key"), style="bold")
     console.print()
     
-    username = Prompt.ask("  username", console=console)
-    password = Prompt.ask("  password", password=True, console=console)
+    api_key = Prompt.ask(" paste your api key")
     
-    console.print()
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-        console=console
-    ) as progress:
-        task = progress.add_task("  logging in...", total=None)
+    # validate the api key with the server
+    try:
+        headers = {"x-api-key": api_key}
+        response = requests.get(f"{main_server_url}/users/me", headers=headers, verify=certifi.where())
         
-        try:
-            res = requests.post(
-                f"{main_server_url}/auth/token",
-                data={"username": username, "password": password}
-            )
-            res.raise_for_status()
-            api_key = res.json()["api_key"]
+        if response.status_code == 200:
             save_api_key(api_key)
-            progress.stop_task(task)
-            console.print(Align.center("✓ login successful"))
-                
-        except requests.RequestException as e:
-            progress.stop_task(task)
-            error_msg = e.response.text if e.response else str(e)
-            console.print(Align.center(f"✗ login failed: {error_msg}"))
-    
+        else:
+            console.print(" invalid api key.", style="red")
+            
+    except requests.RequestException as e:
+        console.print(f" error connecting to server: {e}", style="red")
+
     console.print()
-    input("press enter to continue...")
+    Prompt.ask("press enter to return to the main menu...")
+
 
 def view_tunnels():
-    """view and manage active tunnels with centered layout"""
+    """view active tunnels for the current user."""
     clear_screen()
     show_header()
-    show_user_info()
+    console.print(Align.center("your active tunnels"), style="bold")
+    console.print()
     
     api_key = get_api_key()
     if not api_key:
-        console.print(Align.center("[dim]not logged in[/dim]"))
-        input("press enter to continue...")
+        console.print(" you must be logged in to view tunnels.", style="yellow")
+        console.print()
+        Prompt.ask("press enter to return...")
         return
-
-    headers = {"x-api-key": api_key}
+        
     try:
-        res = requests.get(f"{main_server_url}/tunnels", headers=headers)
-        res.raise_for_status()
-        tunnels = res.json()
+        headers = {"x-api-key": api_key}
+        response = requests.get(f"{main_server_url}/tunnels", headers=headers, verify=certifi.where())
+        response.raise_for_status()
+        
+        tunnels = response.json()
         show_tunnel_status(tunnels)
-
+        
     except requests.RequestException as e:
-        error_msg = e.response.text if e.response else str(e)
-        console.print(Align.center(f"[dim]error fetching tunnels: {error_msg}[/dim]"))
-    
+        console.print(f" error fetching tunnels: {e}", style="red")
+
     console.print()
-    input("press enter to continue...")
+    Prompt.ask("press enter to return to the main menu...")
+
 
 def create_tunnel():
-    """interactive tunnel creation with centered layout"""
+    """interactive prompt to create a new tunnel."""
     clear_screen()
     show_header()
-    show_user_info()
+    console.print(Align.center("create a new tunnel"), style="bold")
+    console.print()
 
     api_key = get_api_key()
     if not api_key:
-        console.print(Align.center("[dim]not logged in - please login first[/dim]"))
-        input("press enter to continue...")
+        console.print(" you must be logged in to create tunnels.", style="yellow")
+        console.print()
+        Prompt.ask("press enter to return...")
         return
-    
-    console.print(Align.center("[bold]create new tunnel[/bold]"))
-    console.print()
-    
-    # tunnel type selection
-    tunnel_type = Prompt.ask(
-        "  tunnel type",
-        choices=["http", "tcp"],
-        default="http",
-        console=console
-    )
-    
-    # local port input
-    while True:
-        try:
-            local_port = int(Prompt.ask("  local port", console=console))
-            if 1 <= local_port <= 65535:
-                break
-            else:
-                console.print(Align.center("[dim]port must be between 1 and 65535[/dim]"))
-        except ValueError:
-            console.print(Align.center("[dim]please enter a valid port number[/dim]"))
-    
-    console.print()
-    
-    # run the tunnel
-    try:
-        asyncio.run(run_tunnel(api_key, tunnel_type, local_port))
-    except KeyboardInterrupt:
-        console.print()
-        console.print(Align.center("[dim]tunnel stopped[/dim]"))
-        console.print()
 
-def show_main_menu():
-    """show main menu with centered layout"""
-    clear_screen()
-    show_header()
-    show_user_info()
+    tunnel_type = Prompt.ask(" select tunnel type", choices=["http", "tcp"], default="http")
+    local_port_str = Prompt.ask(" enter local port number", default="8000")
     
-    # create centered menu
-    menu_items = [
-        "1. create tunnel",
-        "2. view tunnels", 
-        "3. login",
-        "4. register",
-        "5. exit"
-    ]
-    
-    console.print(Align.center("[bold]main menu[/bold]"))
-    console.print()
-    
-    for item in menu_items:
-        console.print(Align.center(f"[dim]{item}[/dim]"))
-    
-    console.print()
-    
-    choice = Prompt.ask("  choose option", choices=["1", "2", "3", "4", "5"], console=console)
-    
-    if choice == "1":
-        create_tunnel()
-    elif choice == "2":
-        view_tunnels()
-    elif choice == "3":
-        login_user()
-    elif choice == "4":
-        register_user()
-    elif choice == "5":
+    try:
+        local_port = int(local_port_str)
+    except ValueError:
+        console.print(" invalid port number.", style="red")
         console.print()
-        console.print(Align.center("[dim]goodbye[/dim]"))
-        sys.exit(0)
+        Prompt.ask("press enter to return...")
+        return
+        
+    if Confirm.ask(f" confirm: create a [bold]{tunnel_type}[/bold] tunnel for port [bold]{local_port}[/bold]?"):
+        asyncio.run(run_tunnel(api_key, tunnel_type, local_port))
+    
+    # after the tunnel runner exits, we just return to the caller (main menu loop)
+    # the runner handles all the UI itself via the Live display.
+    # a final clear is good to reset the screen state.
+    clear_screen()
+    
+def show_main_menu():
+    """the main interactive menu loop for the tui."""
+    while True:
+        clear_screen()
+        show_header()
+        show_user_info()
+        
+        # fetch and show tunnels for authenticated users
+        api_key = get_api_key()
+        if api_key:
+            try:
+                headers = {"x-api-key": api_key}
+                response = requests.get(f"{main_server_url}/tunnels", headers=headers, verify=certifi.where())
+                if response.ok:
+                    show_tunnel_status(response.json())
+                else:
+                    show_tunnel_status([])
+            except requests.RequestException:
+                show_tunnel_status([])
+        else:
+            show_tunnel_status([])
+        
+        console.print()
+        
+        menu_options = {
+            "1": "create tunnel",
+            "2": "manage account",
+            "q": "quit"
+        }
+        
+        # build menu text
+        menu_items = [f"[bold][{key}][/bold] {text}" for key, text in menu_options.items()]
+        menu_text = "   ".join(menu_items)
+        
+        console.print(menu_text, justify="center")
+        choice = Prompt.ask("\n select an option", choices=list(menu_options.keys()), show_choices=False)
+
+        if choice == "1":
+            create_tunnel()
+        elif choice == "2":
+            # simple sub-menu for account management
+            clear_screen()
+            show_header()
+            acc_choice = Prompt.ask("account actions", choices=["login", "register", "back"], default="back")
+            if acc_choice == "login":
+                login_user()
+            elif acc_choice == "register":
+                register_user()
+        elif choice == "q":
+            break
 
 @app.command()
 def tui():
-    """start the interactive tui"""
-    try:
-        while True:
-            show_main_menu()
-    except KeyboardInterrupt:
-        console.print()
-        console.print(Align.center("[dim]goodbye[/dim]"))
+    """launch the interactive terminal user interface."""
+    show_main_menu()
 
 @app.command()
 def quick(
     tunnel_type: str = typer.Argument("http", help="tunnel type (http, tcp)"),
     port: int = typer.Argument(..., help="local port to expose")
 ):
-    """quickly create a tunnel without the tui"""
+    """create a tunnel quickly from the command line."""
     api_key = get_api_key()
     if not api_key:
-        console.print("error: not logged in. run 'python client.py tui' to login first.")
-        return
+        console.print(" error: you must be logged in to create a tunnel.", style="red")
+        console.print(" use [bold]tunnelite tui[/bold] and follow the prompts to log in.", style="dim")
+        raise typer.Exit(1)
+    
+    asyncio.run(run_tunnel(api_key, tunnel_type, port))
 
-    try:
-        asyncio.run(run_tunnel(api_key, tunnel_type, port))
-    except KeyboardInterrupt:
-        console.print("\ntunnel stopped.")
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
-    """tunnelite client - localhost tunneling made simple"""
+    """
+    tunnelite main entry point.
+    
+    if no subcommand is given, it will default to launching the tui.
+    """
     if ctx.invoked_subcommand is None:
         tui()
 
