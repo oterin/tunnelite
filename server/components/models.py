@@ -124,4 +124,7 @@ class BanCheck(BaseModel):
 
 # --- enums ---
 class TunnelType(str, Enum):
-    # ... existing code ...
+    HTTP = "http"
+    HTTPS = "https"
+    TCP = "tcp"
+    UDP = "udp"
