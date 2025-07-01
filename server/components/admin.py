@@ -17,7 +17,7 @@ from server.components.models import *
 from pydantic import BaseModel, Field
 from server import config
 
-from .auth import get_admin_user
+from .auth import get_admin_user, get_current_user
 from .models import BanType, BanScope, BanTarget, Ban, BanCheck
 from .bans import (
     create_ban, check_ban, list_bans, remove_ban, kick_user, 
