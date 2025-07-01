@@ -21,6 +21,7 @@ from rich.prompt import Prompt, Confirm
 from rich.live import Live
 from rich.layout import Layout
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.spinner import Spinner
 from rich import box
 from rich.columns import Columns
 from rich.align import Align
@@ -306,7 +307,7 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
         layout["main"].update(
             Align.center(
                 Panel(
-                    Layout(main_panel_content),
+                    "\n".join([str(item) for item in main_panel_content]),
                     title="tunnel details",
                     border_style="dim",
                     width=60,
@@ -330,14 +331,14 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
         ])
         
         # network event log
-        event_log = Layout(
-            [Layout(Text(format_network_event(e))) for e in network_events[-5:]]
-        )
+        event_log_content = "\n".join([format_network_event(e) for e in network_events[-5:]])
+        if not event_log_content:
+            event_log_content = "[dim]no activity yet[/dim]"
         
         footer_layout = Layout()
         footer_layout.split_column(
             Layout(footer_cols, name="footer_header"),
-            Layout(event_log, name="event_log")
+            Layout(event_log_content, name="event_log")
         )
 
         layout["footer"].update(
@@ -356,10 +357,12 @@ async def run_tunnel(api_key: str, tunnel_type: str, local_port: int):
         if status not in ["active", "error", "disconnected"]:
             layout["header"].update(
                  Columns([
-                    Align.left(Spinner("dots", text=header_text)),
+                    Align.left(Spinner("dots", text=str(header_text))),
                     Align.right(status_text)
                 ])
             )
+        else:
+            layout["header"].update(header_cols)
 
         return layout
     
