@@ -125,6 +125,31 @@ async def get_node_from_token(
     except jwt.InvalidTokenError as e:
         raise WebSocketDisconnect(code=1008, reason=f"invalid token: {e}")
 
+# admin authentication dependency
+async def get_admin_user(admin_key: str = Depends(APIKeyHeader(name="X-Admin-Key", auto_error=False))) -> Dict:
+    """authenticate admin user using admin api key"""
+    from server.config import get as get_config
+    
+    admin_api_key = get_config("TUNNELITE_ADMIN_KEY")
+    if not admin_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="admin api key not configured"
+        )
+    
+    if not admin_key or admin_key != admin_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid or missing admin key"
+        )
+    
+    # return admin user info
+    return {
+        "username": "admin",
+        "role": "admin",
+        "authenticated": True
+    }
+
 # api endpoints
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/hour")
